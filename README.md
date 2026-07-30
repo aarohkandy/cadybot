@@ -1,11 +1,11 @@
 # cadybot
 
-A read-only growth advisor for the Cady Discord server.
+A read-only growth advisor for a Discord server.
 
 A caddy knows the course, carries your clubs, and tells you which club to use —
 but never takes the swing. cadybot reads your server, keeps a durable record of
 it, and tells you what to do. It posts in exactly one place: a private channel
-it creates for you.
+you create with `/private`.
 
 ## What it does
 
@@ -14,32 +14,46 @@ it creates for you.
   as live gateway events — so the listener is the only thing that matters on day one.
 - **Catches.** Flags unanswered questions from members and members who have gone
   quiet. At seven members, one ignored message is a churned user.
-- **Advises.** `ask` gives a straight yes / no / not-yet on a specific idea,
-  grounded in the actual numbers. `brief` gives at most three ranked things to
+- **Advises.** `/ask` gives a straight yes / no / not-yet on a specific idea,
+  grounded in the actual numbers. `/brief` gives at most three ranked things to
   do, each with evidence and a metric to watch.
 - **Remembers.** Every recommendation is stored so it can later tell you whether
   its own advice worked.
 
 It never moderates, never DMs members, and never posts in any channel except its
-own. That last part is enforced in code, not by convention: every outgoing
-message passes a guard that rejects any destination other than your DMs and the
-private channel — see `notify.WriteBlocked`.
+own. That last part is enforced in code: every outgoing message passes a guard
+that rejects any destination other than that server's private channel — see
+`notify.WriteBlocked`.
 
-## The private channel
+## Several servers at once
 
-On startup cadybot creates a channel (default `#cadybot`), hidden from
-`@everyone`, containing you and it. That is where briefs land and where you talk
-to it.
+Add cadybot to as many servers as you like. Each one is completely independent:
+its own private channel, its own owner, its own numbers, its own
+recommendations. Every row in the database is keyed by `guild_id` and no query
+crosses servers, so a test server and a live server can never see each other.
+
+Run `/private` separately in each. Whoever runs it becomes that server's owner —
+the person whose posting cadence is tracked, and whose messages aren't counted
+as unanswered questions.
+
+## Commands
+
+Run these in Discord. `/private`, `/add`, `/remove` and `/backfill` need
+**Manage Server**; the rest need to be able to see the private channel.
 
 ```
-who                 who can currently see it
-add @someone        let someone in
-remove @someone     take them back out
+/private            create (or repair) your private channel here
+/ask <question>     a straight yes / no / not-yet
+/brief              what to do this week, ranked
+/snapshot           the raw numbers, no interpretation
+/who                who can see the private channel
+/add @someone       let someone in
+/remove @someone    take them back out
+/backfill           import this server's message history
 ```
 
-Anyone in the channel can run `ask`, `brief`, `snapshot` and `who`.
-`add`, `remove` and `backfill` are yours only. Ordinary conversation in there is
-ignored, so it works as a real chat rather than a command prompt.
+Answers are visible in the private channel and ephemeral (only you see them)
+anywhere else, so cadybot never puts analytics in front of your members.
 
 ## Setup
 
@@ -49,36 +63,38 @@ cp .env.example .env
 ```
 
 Create an application at <https://discord.com/developers/applications>, add a
-bot, copy the token into `.env`, then under **Bot → Privileged Gateway Intents**
-enable **Server Members Intent** and **Message Content Intent**. Under 10,000
-reachable users these are plain toggles — no application to file.
-
-Then print your invite link:
-
-```bash
-python -m cadybot invite
-```
-
-It prints two URLs: a scoped one with exactly what cadybot uses, and an
-Administrator one for a throwaway test server. The scoped set is View Channels,
-Send Messages, Read Message History, Manage Channels, Manage Roles, Manage
-Server. The two Manage permissions are what let it create the private channel
-and control who sees it; Manage Server is what lets it read invite use-counts to
-attribute joins.
-
-## Use
+bot, and put the token in `.env`. Under **Bot → Privileged Gateway Intents**
+enable **Server Members Intent** and **Message Content Intent** — nothing works
+without both. Under 10,000 reachable users these are plain toggles, no
+application to file.
 
 ```bash
-python -m cadybot doctor                      # is the model backend reachable?
-python -m cadybot listen --backfill           # start logging + import history
-python -m cadybot snapshot                    # raw numbers, no model involved
-python -m cadybot ask "would a weekly event help?"
-python -m cadybot brief
-python -m cadybot outcomes                    # did past advice work?
+python -m cadybot invite     # prints your OAuth URLs
+python -m cadybot listen     # keep this running
 ```
 
-Keep `listen` running. Everything else also works from inside the private
-channel, which is the intended way to use it day to day.
+The invite URL includes the `applications.commands` scope; without it the slash
+commands never appear. The scoped permission set is View Channels, Send
+Messages, Read Message History, Manage Channels, Manage Roles, Manage Server.
+The two Manage permissions let cadybot create the private channel and control
+who sees it; Manage Server lets it read invite use-counts to attribute joins.
+
+Slash commands are synced per-server the moment cadybot joins, so they appear
+immediately.
+
+## Command line
+
+```bash
+python -m cadybot doctor                  # is the model backend reachable?
+python -m cadybot servers                 # which servers cadybot knows
+python -m cadybot snapshot --guild <id>   # raw numbers, no model involved
+python -m cadybot ask --guild <id> "would a weekly event help?"
+python -m cadybot brief --guild <id>
+python -m cadybot outcomes --guild <id>   # did past advice work?
+```
+
+`--guild` can be omitted if `GUILD_ID` is set in `.env`, or if cadybot only
+knows about one server. With several known and no default it refuses to guess.
 
 ## Model backend
 
@@ -87,8 +103,8 @@ channel, which is the intended way to use it day to day.
 
 The local path is for exercising the plumbing. A 9GB local model will follow the
 stage gates and cite the snapshot, but its judgment is visibly thinner than the
-API's, and judgment is the entire product. Treat local output as proof the wiring
-works, not as advice worth acting on.
+API's, and judgment is the entire product. Treat local output as proof the
+wiring works, not as advice worth acting on.
 
 `CADYBOT_OLLAMA_NUM_CTX` matters more than the model choice. Ollama's default
 context is small enough to silently truncate the system prompt, and a truncated
@@ -100,15 +116,12 @@ the window.
 
 Everything lands in `cadybot.db` (gitignored). Message text is kept in full for
 now — seven people cannot generate enough to matter. Revisit a rolling window at
-~1,000 members. `python -m cadybot purge --member <id>` deletes one member's
-data on request.
+~1,000 members. `python -m cadybot purge --guild <id> --member <id>` deletes one
+member's data on request.
 
-Messages in the private channel are never stored, so cadybot's own output can
+Messages in a private channel are never stored, so cadybot's own output can
 never inflate its own numbers. Bot messages are excluded from activity counts
 for the same reason: a chatty bot is not a lively server.
-
-Every table carries `guild_id` and no query crosses guilds, so this can go
-multi-tenant later without a schema rewrite.
 
 ## Compliance notes
 

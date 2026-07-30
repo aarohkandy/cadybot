@@ -94,10 +94,14 @@ def unanswered_questions(guild_id: int, owner_id: int) -> List[Dict[str, Any]]:
 
 
 def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dict[str, Any]:
+    """Everything cadybot knows about one server. Never spans servers."""
     guild_id = guild_id or config.GUILD_ID
-    owner_id = owner_id or config.OWNER_ID
-    if guild_id is None or owner_id is None:
-        raise SystemExit("GUILD_ID and OWNER_ID must be set.")
+    if guild_id is None:
+        raise SystemExit("No server chosen. Pass --guild, or set GUILD_ID in .env.")
+    # The owner is whoever ran /private in this server. Falls back to 0, which
+    # matches nobody — so their messages simply aren't excluded from the
+    # unanswered-question check.
+    owner_id = owner_id or room.owner_id(guild_id) or 0
 
     members = db.query(
         "SELECT user_id, username, display_name, is_bot, joined_at, invite_code "

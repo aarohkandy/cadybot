@@ -56,26 +56,27 @@ def _turn(instruction: str, snap: Dict[str, Any], question: Optional[str]) -> st
     return "\n\n".join(parts)
 
 
-def ask(question: str, snap: Dict[str, Any]) -> Verdict:
+def ask(question: str, snap: Dict[str, Any], guild_id: Optional[int] = None) -> Verdict:
     return llm.generate(
         prompts.stable_prefix(),
         _turn(prompts.ASK_INSTRUCTION, snap, question),
         Verdict,
         "ask",
+        guild_id or config.GUILD_ID,
     )
 
 
-def brief(snap: Dict[str, Any]) -> Brief:
+def brief(snap: Dict[str, Any], guild_id: Optional[int] = None) -> Brief:
+    guild_id = guild_id or config.GUILD_ID
     result = llm.generate(
         prompts.stable_prefix(),
         _turn(prompts.BRIEF_INSTRUCTION, snap, None),
         Brief,
         "brief",
+        guild_id,
     )
-    if config.GUILD_ID:
-        db.save_recommendations(
-            config.GUILD_ID, [r.model_dump() for r in result.recommendations]
-        )
+    if guild_id:
+        db.save_recommendations(guild_id, [r.model_dump() for r in result.recommendations])
     return result
 
 

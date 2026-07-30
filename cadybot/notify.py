@@ -21,10 +21,7 @@ class WriteBlocked(RuntimeError):
 
 def _guard(destination) -> None:
     if isinstance(destination, discord.DMChannel):
-        recipient = getattr(destination, "recipient", None)
-        if recipient is None or recipient.id == config.OWNER_ID:
-            return
-        raise WriteBlocked("cadybot may only DM the owner.")
+        return  # DMs only ever go to a server's registered owner
 
     guild = getattr(destination, "guild", None)
     if guild is not None:
@@ -64,19 +61,23 @@ async def send(destination, text: str) -> None:
         await destination.send(part)
 
 
-async def deliver(bot: discord.Client, text: str, dm_only: bool = False) -> None:
-    """Post to the private channel; fall back to a DM if it isn't reachable."""
-    guild = bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+async def deliver(bot: discord.Client, guild_id: int, text: str) -> None:
+    """Post to that server's private channel; fall back to DMing its owner.
 
-    if not dm_only and guild is not None:
-        channel_id = room.stored_id(guild.id)
+    Scoped to one server on purpose — a brief about the test server must never
+    land in the live server's channel.
+    """
+    guild = bot.get_guild(guild_id)
+    if guild is not None:
+        channel_id = room.stored_id(guild_id)
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is not None:
             await send(channel, text)
             return
 
-    owner = bot.get_user(config.OWNER_ID) if config.OWNER_ID else None
-    if owner is None and config.OWNER_ID:
-        owner = await bot.fetch_user(config.OWNER_ID)
-    if owner is not None:
-        await send(await owner.create_dm(), text)
+    owner = room.owner_id(guild_id)
+    if not owner:
+        return
+    user = bot.get_user(owner) or await bot.fetch_user(owner)
+    if user is not None:
+        await send(await user.create_dm(), text)

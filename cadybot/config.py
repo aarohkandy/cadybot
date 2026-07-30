@@ -24,6 +24,10 @@ def _required_int(name: str) -> int:
 
 
 DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
+
+# Both optional. cadybot works in every server it is added to; each server gets
+# its own private channel, its own owner, and its own isolated data. These two
+# only set a default for the CLI so you don't have to pass --guild every time.
 GUILD_ID = _int("GUILD_ID")
 OWNER_ID = _int("OWNER_ID")
 
@@ -58,5 +62,3 @@ UNANSWERED_HOURS = 3
 def require_discord() -> None:
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
-    _required_int("GUILD_ID")
-    _required_int("OWNER_ID")

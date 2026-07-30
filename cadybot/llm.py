@@ -39,7 +39,7 @@ def _flatten(system_blocks: List[Dict[str, Any]]) -> str:
 # --- ollama ----------------------------------------------------------------
 
 
-def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
+def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str, guild_id) -> T:
     """Local inference via Ollama's schema-constrained decoding.
 
     num_ctx matters more than anything else here. Ollama's default context is
@@ -91,9 +91,9 @@ def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
         )
 
     content = (body.get("message") or {}).get("content") or ""
-    if config.GUILD_ID:
+    if guild_id:
         db.record_local_run(
-            config.GUILD_ID, kind, config.OLLAMA_MODEL, prompt_tokens, body.get("eval_count") or 0
+            guild_id, kind, config.OLLAMA_MODEL, prompt_tokens, body.get("eval_count") or 0
         )
 
     try:
@@ -109,7 +109,7 @@ def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
 # --- anthropic -------------------------------------------------------------
 
 
-def _claude(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
+def _claude(system_blocks, user_text: str, schema: Type[T], kind: str, guild_id) -> T:
     global _anthropic_client
     import anthropic
 
@@ -132,8 +132,8 @@ def _claude(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
     if response.stop_reason == "max_tokens":
         raise BackendError("Response hit max_tokens; raise it in llm.py.")
 
-    if config.GUILD_ID:
-        db.record_run(config.GUILD_ID, kind, response.usage, config.MODEL)
+    if guild_id:
+        db.record_run(guild_id, kind, response.usage, config.MODEL)
 
     parsed = response.parsed_output
     if parsed is None:
@@ -144,11 +144,13 @@ def _claude(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
 # --- dispatch --------------------------------------------------------------
 
 
-def generate(system_blocks, user_text: str, schema: Type[T], kind: str) -> T:
+def generate(
+    system_blocks, user_text: str, schema: Type[T], kind: str, guild_id: Optional[int] = None
+) -> T:
     if config.BACKEND == "ollama":
-        return _ollama(system_blocks, user_text, schema, kind)
+        return _ollama(system_blocks, user_text, schema, kind, guild_id)
     if config.BACKEND == "anthropic":
-        return _claude(system_blocks, user_text, schema, kind)
+        return _claude(system_blocks, user_text, schema, kind, guild_id)
     raise BackendError("Unknown CADYBOT_BACKEND %r (use 'ollama' or 'anthropic')." % config.BACKEND)
 
 
