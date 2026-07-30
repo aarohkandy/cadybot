@@ -82,6 +82,35 @@ who sees it; Manage Server lets it read invite use-counts to attribute joins.
 Slash commands are synced per-server the moment cadybot joins, so they appear
 immediately.
 
+## Hosting it on a Mac
+
+```bash
+deploy/install.sh              # start now, and at every login
+deploy/install.sh --awake      # ...and stop the Mac idle-sleeping while it runs
+deploy/install.sh status
+deploy/install.sh restart      # after changing code or .env
+deploy/install.sh stop
+deploy/install.sh uninstall
+```
+
+This installs a launchd agent that starts cadybot at login and restarts it if it
+dies. Logs go to `logs/cadybot.log` and `logs/cadybot.err`.
+
+**Don't keep the project in `~/Downloads`, `~/Desktop`, or `~/Documents.`**
+macOS blocks background agents from reading those directories, and the failure
+is an opaque `PermissionError: Operation not permitted` on `.venv/pyvenv.cfg`
+rather than anything that mentions permissions. `~/cadybot` is fine.
+
+**While the Mac sleeps, cadybot is offline**, and gateway events during that
+window are gone for good. Messages can be recovered later with `/backfill`;
+joins and leaves cannot — Discord has no API for them. `--awake` wraps the agent
+in `caffeinate -i` so the machine won't idle-sleep while it's running, at a real
+cost in battery. Closing the lid still sleeps regardless.
+
+Local inference also needs Ollama running. The Ollama app installs itself as a
+background service, so it comes back on its own after a reboot; `python -m
+cadybot doctor` tells you if it hasn't.
+
 ## Command line
 
 ```bash

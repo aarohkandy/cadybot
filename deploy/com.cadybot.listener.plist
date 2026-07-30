@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. __CADYBOT_DIR__ is replaced by deploy/install.sh, which writes the
+  result to ~/Library/LaunchAgents/ and loads it.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cadybot.listener</string>
+
+    <key>ProgramArguments</key>
+    <array>
+__CAFFEINATE__
+        <string>__CADYBOT_DIR__/.venv/bin/python</string>
+        <string>-m</string>
+        <string>cadybot</string>
+        <string>listen</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__CADYBOT_DIR__</string>
+
+    <!-- Start at login and keep it up. launchd throttles restarts to one every
+         10 seconds, so a crash loop can't run away. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__CADYBOT_DIR__/logs/cadybot.log</string>
+    <key>StandardErrorPath</key>
+    <string>__CADYBOT_DIR__/logs/cadybot.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>
