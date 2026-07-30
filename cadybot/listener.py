@@ -48,15 +48,27 @@ class Cadybot(discord.Client):
 
     async def setup_hook(self) -> None:
         register_commands(self)
-        await self.tree.sync()  # global; can take up to an hour to propagate
 
     async def on_ready(self) -> None:
         print("cadybot online as %s" % self.user)
         print("backend: %s" % llm.describe())
 
+        # Commands are registered per-guild (instant) rather than globally (up
+        # to an hour to propagate). Doing both makes Discord list every command
+        # twice, so drop any global copies left over from an earlier run. The
+        # in-memory tree is untouched, so copy_global_to still works below.
+        try:
+            await self.http.bulk_upsert_global_commands(self.application_id, [])
+        except Exception as exc:
+            print("could not clear global commands: %s" % exc)
+
         problem = llm.preflight()
         if problem:
             print("WARNING: %s" % problem)
+        else:
+            # Load the model now rather than making the first question wait for
+            # it. Runs in a thread so the gateway connection isn't blocked.
+            asyncio.get_event_loop().run_in_executor(None, llm.warm)
 
         if not self.guilds:
             print("Not in any server yet. Use `python -m cadybot invite`.")
@@ -275,9 +287,31 @@ class Cadybot(discord.Client):
 
 
 async def _reply(interaction: discord.Interaction, text: str, ephemeral: bool) -> None:
-    """Send a possibly-long reply, chunked to Discord's 2000-character limit."""
-    for part in notify.chunk(text):
-        await interaction.followup.send(part, ephemeral=ephemeral)
+    """Send a possibly-long reply, chunked to Discord's 2000-character limit.
+
+    An interaction token dies if the bot restarts mid-command or the reply takes
+    longer than Discord's window — both plausible when a 9GB local model is
+    doing the thinking. Rather than lose an answer that cost real time to
+    produce, fall back to posting it in the private channel.
+    """
+    parts = notify.chunk(text)
+    try:
+        for part in parts:
+            await interaction.followup.send(part, ephemeral=ephemeral)
+        return
+    except discord.HTTPException as exc:
+        print("interaction reply failed (%s); falling back to the channel" % exc)
+
+    guild_id = interaction.guild_id
+    if guild_id:
+        try:
+            await notify.deliver(
+                interaction.client,
+                guild_id,
+                "%s\n%s" % (interaction.user.mention, text),
+            )
+        except Exception:
+            traceback.print_exc()
 
 
 def register_commands(bot: Cadybot) -> None:
@@ -357,12 +391,23 @@ def register_commands(bot: Cadybot) -> None:
         if channel is None:
             await _reply(interaction, NO_ROOM, True)
             return
-        names = room.roster(channel)
-        await _reply(
-            interaction,
-            "%s: %s" % (channel.mention, ", ".join(names) if names else "just cadybot"),
-            True,
-        )
+        seats = room.roster(channel)
+        lines = [
+            "**%s**" % channel.mention,
+            "",
+            "**Added:** %s" % (", ".join(seats["added"]) or "just cadybot"),
+        ]
+        if seats["bypassing"]:
+            lines += [
+                "",
+                "**Can also read it anyway:**",
+                "\n".join("- " + s for s in seats["bypassing"]),
+                "",
+                "Administrators bypass channel privacy — `/remove` cannot shut them "
+                "out. Take Administrator off their role in Server Settings → Roles "
+                "if you need this channel actually sealed.",
+            ]
+        await _reply(interaction, "\n".join(lines), True)
 
     @tree.command(name="add", description="Let someone into the private channel")
     @app_commands.guild_only()

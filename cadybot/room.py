@@ -150,12 +150,37 @@ async def remove(channel: discord.TextChannel, member: discord.Member) -> None:
         raise RoomError("I need **Manage Roles** to change who can see this channel.")
 
 
-def roster(channel: discord.TextChannel) -> List[str]:
-    names = []
-    for target, overwrite in channel.overwrites.items():
-        if isinstance(target, discord.Member) and overwrite.view_channel:
-            names.append(target.display_name)
-    return sorted(names)
+def roster(channel: discord.TextChannel) -> Dict[str, List[str]]:
+    """Who can *actually* read this channel, not just who was added to it.
+
+    Administrators bypass channel overwrites entirely — marking a channel
+    private does not hide it from them, and there is nothing cadybot can do
+    about that from inside the channel. Reporting only the explicit overwrites
+    would have quietly claimed a privacy guarantee that isn't real, so both
+    groups are reported separately.
+    """
+    explicit = {
+        t.id
+        for t, ow in channel.overwrites.items()
+        if isinstance(t, discord.Member) and ow.view_channel
+    }
+    added: List[str] = []
+    bypassing: List[str] = []
+
+    for member in channel.members:
+        if not channel.permissions_for(member).view_channel:
+            continue
+        label = member.display_name + (" (bot)" if member.bot else "")
+        if member.id in explicit or member.id == channel.guild.me.id:
+            added.append(label)
+        elif member.guild_permissions.administrator:
+            bypassing.append(label + " — Administrator")
+        elif member == channel.guild.owner:
+            bypassing.append(label + " — server owner")
+        else:
+            bypassing.append(label + " — via a role")
+
+    return {"added": sorted(added), "bypassing": sorted(bypassing)}
 
 
 def forget(guild_id: int) -> None:

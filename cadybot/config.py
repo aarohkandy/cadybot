@@ -52,6 +52,9 @@ OLLAMA_MODEL = os.getenv("CADYBOT_OLLAMA_MODEL") or "gemma4:e4b"
 # prompt. A truncated stage gate is worse than none at all.
 OLLAMA_NUM_CTX = _int("CADYBOT_OLLAMA_NUM_CTX", 16384)
 OLLAMA_TIMEOUT = _int("CADYBOT_OLLAMA_TIMEOUT", 600)
+# How long Ollama keeps the model in memory after a request. The default is 5
+# minutes, which means most questions pay a multi-GB reload before answering.
+OLLAMA_KEEP_ALIVE = os.getenv("CADYBOT_OLLAMA_KEEP_ALIVE") or "30m"
 
 # A member who has not posted in this many days counts as gone quiet.
 QUIET_DAYS = 14

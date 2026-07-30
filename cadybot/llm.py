@@ -50,6 +50,10 @@ def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str, guild_id)
     payload = {
         "model": config.OLLAMA_MODEL,
         "stream": False,
+        # Ollama evicts an idle model after 5 minutes. Reloading 9GB from disk
+        # on every question adds minutes to a reply that should take seconds,
+        # so keep it resident between commands.
+        "keep_alive": config.OLLAMA_KEEP_ALIVE,
         "options": {"num_ctx": config.OLLAMA_NUM_CTX, "temperature": 0.2},
         "format": schema.model_json_schema(),
         "messages": [
@@ -158,6 +162,23 @@ def describe() -> str:
     if config.BACKEND == "ollama":
         return "%s (local)" % config.OLLAMA_MODEL
     return config.MODEL
+
+
+def warm() -> None:
+    """Load the local model into memory so the first question isn't a cold start.
+
+    Best effort — a failure here only costs latency, never correctness.
+    """
+    if config.BACKEND != "ollama":
+        return
+    try:
+        httpx.post(
+            "%s/api/generate" % config.OLLAMA_HOST,
+            json={"model": config.OLLAMA_MODEL, "keep_alive": config.OLLAMA_KEEP_ALIVE},
+            timeout=httpx.Timeout(config.OLLAMA_TIMEOUT),
+        )
+    except Exception:
+        pass
 
 
 def preflight() -> Optional[str]:

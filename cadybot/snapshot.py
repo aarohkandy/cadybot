@@ -40,6 +40,24 @@ def _name(row: Any) -> str:
     return row["display_name"] or row["username"] or str(row["user_id"])
 
 
+# A snapshot must stay roughly the same size whether the server has 7 members
+# or 50,000, because it has to fit in a context window either way. Anything
+# that grows with member count is reported as a count plus a sample; the model
+# is told the difference so it never mistakes a sample for the whole list.
+SAMPLE_MEMBERS = 12
+SAMPLE_CHANNELS = 25
+
+
+def _capped(items: List[Any], limit: int) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"count": len(items)}
+    if len(items) <= limit:
+        out["all"] = items
+    else:
+        out["sample"] = items[:limit]
+        out["note"] = "sample of %d; %d more not shown" % (limit, len(items) - limit)
+    return out
+
+
 def unanswered_questions(guild_id: int, owner_id: int) -> List[Dict[str, Any]]:
     """Member questions nobody replied to.
 
@@ -125,6 +143,9 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         age = _age_days(last_post.get(m["user_id"]))
         if age is not None and age >= config.QUIET_DAYS:
             gone_quiet.append({"member": _name(m), "silent_days": age})
+    # Longest-silent first, so the sample is the interesting end of the list
+    # rather than an arbitrary slice.
+    gone_quiet.sort(key=lambda g: g["silent_days"], reverse=True)
 
     # Bots are excluded from activity counts: a chatty bot is not a lively
     # server, and counting its output would hide exactly the problem we care
@@ -237,8 +258,12 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         "members": {
             "humans": len(humans),
             "bots": len(members) - len(humans),
-            "never_posted": never_posted,
-            "gone_quiet": gone_quiet,
+            "never_posted": _capped(never_posted, SAMPLE_MEMBERS),
+            "never_posted_pct": (
+                round(100 * len(never_posted) / len(humans)) if humans else 0
+            ),
+            "gone_quiet": _capped(gone_quiet, SAMPLE_MEMBERS),
+            "gone_quiet_pct": round(100 * len(gone_quiet) / len(humans)) if humans else 0,
         },
         "activity": {
             "messages_7d": msgs_7,
@@ -250,14 +275,17 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
             ),
             "days_since_owner_posted": _age_days(last_post.get(owner_id)),
         },
-        "channels": channels,
+        "channels": _capped(channels, SAMPLE_CHANNELS),
+        "dead_channels": _capped(
+            [c["channel"] for c in channels if not c["messages_30d"]], SAMPLE_CHANNELS
+        ),
         "membership_flow_30d": {
             "joins": joins_30,
             "leaves": leaves_30,
             "note": "Joins and leaves only exist from logging_since onward; "
             "they cannot be backfilled from Discord.",
         },
-        "invite_attribution": invites,
+        "invite_attribution": _capped(invites, SAMPLE_CHANNELS),
         "voice_30d": {"sessions": voice_30, "unique_participants": voice_people_30},
         "top_posters_30d": top_posters,
         "unanswered_questions": unanswered_questions(guild_id, owner_id),

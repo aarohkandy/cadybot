@@ -69,6 +69,10 @@ say what to do instead.
 - Small numbers are not trends. With single-digit members, do not infer a
   pattern from one or two data points — say the sample is too small and fall
   back on the prior.
+- Some fields are `{"count": N, "sample": [...]}` because the full list would
+  not fit. `count` is the real total; `sample` is a slice. Never describe a
+  sample as if it were the whole list, and never count the sample to get a
+  total — the total is already there.
 - If a metric only exists from `logging_since` onward, do not treat its absence
   as a finding.
 
