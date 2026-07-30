@@ -36,6 +36,20 @@ Run `/private` separately in each. Whoever runs it becomes that server's owner â
 the person whose posting cadence is tracked, and whose messages aren't counted
 as unanswered questions.
 
+## Talking to it
+
+Inside the private channel, just type. Any ordinary message is a question, and
+cadybot answers with the same stage gates and evidence discipline as `/brief` â€”
+it will still tell you no. It remembers the last several turns, so follow-ups
+work, and that history survives a restart.
+
+Start a line with `//` to say something it should ignore, so the channel stays
+usable for notes and side chat. `/reset` clears the thread when you change
+subject.
+
+Commands are still there for the crisp version: `/ask` forces a yes/no/not-yet
+verdict, `/brief` produces the ranked list.
+
 ## Commands
 
 Run these in Discord. `/private`, `/add`, `/remove` and `/backfill` need

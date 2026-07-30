@@ -27,16 +27,19 @@ TOPIC = "Private. cadybot posts here and nowhere else."
 
 WELCOME = (
     "**cadybot is listening.**\n\n"
-    "This channel is private — only the people listed here can see it.\n\n"
+    "Just talk to me here — no command needed. Start a line with `//` if you "
+    "want to say something I should ignore.\n\n"
     "`/ask <question>` — a straight yes / no / not-yet\n"
     "`/brief` — what to do this week\n"
     "`/snapshot` — the raw numbers, no interpretation\n"
     "`/who` — who can see this channel\n"
     "`/add` and `/remove` — change that\n"
-    "`/backfill` — import message history\n\n"
-    "It reads every other channel in this server and never writes to them. "
-    "Other servers cadybot is in are kept entirely separate from this one.\n\n"
-    "Nothing said in here is counted as server activity."
+    "`/backfill` — import message history\n"
+    "`/reset` — forget the conversation so far\n\n"
+    "This channel is private, and I read every other channel in this server "
+    "without ever writing to them. Other servers I'm in are kept entirely "
+    "separate.\n\n"
+    "Nothing said in here counts as server activity."
 )
 
 

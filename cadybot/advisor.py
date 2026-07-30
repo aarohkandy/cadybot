@@ -80,6 +80,29 @@ def brief(snap: Dict[str, Any], guild_id: Optional[int] = None) -> Brief:
     return result
 
 
+def chat(
+    guild_id: int, channel_id: int, message: str, speaker: str, snap: Dict[str, Any]
+) -> str:
+    """One conversational turn, with the running history and a fresh snapshot.
+
+    The snapshot rides on the newest message rather than the system prompt so
+    the cached prefix stays byte-identical between turns.
+    """
+    history = db.recent_turns(guild_id, channel_id)
+    latest = "%s\n\n```json\n%s\n```\n\n%s: %s" % (
+        prompts.CHAT_INSTRUCTION,
+        json.dumps(snap, indent=2, default=str),
+        speaker,
+        message,
+    )
+    reply = llm.converse(
+        prompts.stable_prefix(), history + [{"role": "user", "content": latest}], guild_id
+    )
+    db.add_turn(guild_id, channel_id, "user", message, speaker)
+    db.add_turn(guild_id, channel_id, "assistant", reply)
+    return reply
+
+
 # --- rendering -------------------------------------------------------------
 
 _MARK = {"yes": "YES", "no": "NO", "not_yet": "NOT YET"}

@@ -164,6 +164,58 @@ def describe() -> str:
     return config.MODEL
 
 
+def converse(system_blocks, messages: List[Dict[str, str]], guild_id=None) -> str:
+    """Free-text reply for ordinary conversation. No schema — this is talking.
+
+    `messages` is the running exchange, oldest first, each {role, content}.
+    """
+    if config.BACKEND == "ollama":
+        payload = {
+            "model": config.OLLAMA_MODEL,
+            "stream": False,
+            "keep_alive": config.OLLAMA_KEEP_ALIVE,
+            "options": {"num_ctx": config.OLLAMA_NUM_CTX, "temperature": 0.4},
+            "messages": [{"role": "system", "content": _flatten(system_blocks)}] + messages,
+        }
+        try:
+            response = httpx.post(
+                "%s/api/chat" % config.OLLAMA_HOST,
+                json=payload,
+                timeout=httpx.Timeout(config.OLLAMA_TIMEOUT),
+            )
+        except httpx.ConnectError as exc:
+            raise BackendError(
+                "Can't reach Ollama at %s. Is it running?" % config.OLLAMA_HOST
+            ) from exc
+        except httpx.ReadTimeout as exc:
+            raise BackendError("Ollama timed out after %ds." % config.OLLAMA_TIMEOUT) from exc
+        response.raise_for_status()
+        body = response.json()
+        if guild_id:
+            db.record_local_run(
+                guild_id, "chat", config.OLLAMA_MODEL,
+                body.get("prompt_eval_count") or 0, body.get("eval_count") or 0,
+            )
+        return ((body.get("message") or {}).get("content") or "").strip()
+
+    global _anthropic_client
+    import anthropic
+
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic()
+    response = _anthropic_client.messages.create(
+        model=config.MODEL,
+        max_tokens=2000,
+        system=system_blocks,
+        messages=messages,
+    )
+    if response.stop_reason == "refusal":
+        raise Refused("Claude declined that one.")
+    if guild_id:
+        db.record_run(guild_id, "chat", response.usage, config.MODEL)
+    return "".join(b.text for b in response.content if b.type == "text").strip()
+
+
 def warm() -> None:
     """Load the local model into memory so the first question isn't a cold start.
 

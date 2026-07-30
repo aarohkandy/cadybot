@@ -42,6 +42,7 @@ class Cadybot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.backfill_on_start = backfill_on_start
         self._rooms: Dict[int, Optional[int]] = {}
+        self._talking: Dict[int, asyncio.Lock] = {}
         self._invite_uses: Dict[int, Dict[str, int]] = {}
 
     # --- lifecycle ---------------------------------------------------------
@@ -147,8 +148,10 @@ class Cadybot(discord.Client):
             return
 
         # The private channel is a console, not part of the server's life. Its
-        # messages are never stored, so they can never inflate the snapshot.
+        # messages are never stored as server activity, so they can never
+        # inflate the snapshot — they are a conversation instead.
         if message.channel.id == self._rooms.get(message.guild.id):
+            await self._converse(message)
             return
 
         db.upsert_member(
@@ -210,6 +213,47 @@ class Cadybot(discord.Client):
         elif before.channel and after.channel and before.channel.id != after.channel.id:
             db.close_voice(gid, member.id)
             db.open_voice(gid, after.channel.id, member.id)
+
+    # --- conversation ------------------------------------------------------
+
+    async def _converse(self, message: discord.Message) -> None:
+        """Talk back. Any ordinary message in the private channel is a question.
+
+        Prefix a line with // to say something without cadybot answering, so the
+        channel is still usable for notes and side chat between people.
+        """
+        if message.author.bot:
+            return
+        text = (message.content or "").strip()
+        if not text or text.startswith("//"):
+            return
+
+        lock = self._talking.setdefault(message.channel.id, asyncio.Lock())
+        if lock.locked():
+            # Still thinking about the previous message. Say so once rather than
+            # silently queueing a reply that arrives minutes later out of order.
+            await message.add_reaction("\N{HOURGLASS WITH FLOWING SAND}")
+            return
+
+        async with lock:
+            try:
+                async with message.channel.typing():
+                    snap = snapshot.build(message.guild.id)
+                    reply = await asyncio.to_thread(
+                        advisor.chat,
+                        message.guild.id,
+                        message.channel.id,
+                        text,
+                        message.author.display_name,
+                        snap,
+                    )
+                if reply:
+                    await notify.send(message.channel, reply)
+            except (advisor.Refused, advisor.BackendError) as exc:
+                await notify.send(message.channel, str(exc))
+            except Exception:
+                traceback.print_exc()
+                await notify.send(message.channel, "That failed. Check the listener log.")
 
     # --- helpers used by the commands --------------------------------------
 
@@ -453,6 +497,16 @@ def register_commands(bot: Cadybot) -> None:
             interaction.guild, skip_channel_id=bot._rooms.get(interaction.guild_id)
         )
         await _reply(interaction, "Imported %d messages." % total, True)
+
+    @tree.command(name="reset", description="Forget the conversation so far in this channel")
+    @app_commands.guild_only()
+    async def reset(interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not bot.may_read(interaction):
+            await _reply(interaction, NO_ROOM, True)
+            return
+        n = db.clear_turns(interaction.guild_id, interaction.channel_id)
+        await _reply(interaction, "Forgot %d turns. Starting fresh." % n, True)
 
     @tree.error
     async def on_error(interaction: discord.Interaction, error: Exception) -> None:

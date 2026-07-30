@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS runs (
     cache_read     INTEGER
 );
 
+-- Conversation history for the private channel, so talking to cadybot survives
+-- a restart. Kept per channel and trimmed to the last few turns.
+CREATE TABLE IF NOT EXISTS conversation (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    role        TEXT NOT NULL,          -- user | assistant
+    speaker     TEXT,
+    content     TEXT NOT NULL,
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_conversation ON conversation (guild_id, channel_id, id);
+
 CREATE TABLE IF NOT EXISTS settings (
     guild_id  INTEGER NOT NULL,
     key       TEXT NOT NULL,
@@ -351,6 +364,49 @@ def record_local_run(
         "VALUES (?, ?, ?, ?, ?, ?, 0)",
         (guild_id, kind, now(), model, prompt_tokens, output_tokens),
     )
+
+
+CONVERSATION_TURNS = 16
+
+
+def add_turn(
+    guild_id: int, channel_id: int, role: str, content: str, speaker: Optional[str] = None
+) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT INTO conversation (guild_id, channel_id, role, speaker, content, at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (guild_id, channel_id, role, speaker, content, now()),
+    )
+    # Keep only the most recent turns; old context stops being useful long
+    # before it stops costing tokens.
+    conn.execute(
+        "DELETE FROM conversation WHERE guild_id=? AND channel_id=? AND id NOT IN "
+        "(SELECT id FROM conversation WHERE guild_id=? AND channel_id=? "
+        " ORDER BY id DESC LIMIT ?)",
+        (guild_id, channel_id, guild_id, channel_id, CONVERSATION_TURNS),
+    )
+
+
+def recent_turns(guild_id: int, channel_id: int) -> List[Dict[str, str]]:
+    rows = query(
+        "SELECT role, speaker, content FROM conversation "
+        "WHERE guild_id=? AND channel_id=? ORDER BY id",
+        (guild_id, channel_id),
+    )
+    out = []
+    for r in rows:
+        text = r["content"]
+        if r["role"] == "user" and r["speaker"]:
+            text = "%s: %s" % (r["speaker"], text)
+        out.append({"role": r["role"], "content": text})
+    return out
+
+
+def clear_turns(guild_id: int, channel_id: int) -> int:
+    return connect().execute(
+        "DELETE FROM conversation WHERE guild_id=? AND channel_id=?", (guild_id, channel_id)
+    ).rowcount
 
 
 def get_setting(guild_id: int, key: str) -> Optional[str]:
