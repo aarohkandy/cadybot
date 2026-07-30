@@ -113,6 +113,13 @@ CREATE TABLE IF NOT EXISTS runs (
     output_tokens  INTEGER,
     cache_read     INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    guild_id  INTEGER NOT NULL,
+    key       TEXT NOT NULL,
+    value     TEXT,
+    PRIMARY KEY (guild_id, key)
+);
 """
 
 
@@ -333,6 +340,29 @@ def record_run(guild_id: int, kind: str, usage: Any, model: str) -> None:
             getattr(usage, "output_tokens", None),
             getattr(usage, "cache_read_input_tokens", None),
         ),
+    )
+
+
+def record_local_run(
+    guild_id: int, kind: str, model: str, prompt_tokens: int, output_tokens: int
+) -> None:
+    connect().execute(
+        "INSERT INTO runs (guild_id, kind, created_at, model, input_tokens, output_tokens, cache_read) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0)",
+        (guild_id, kind, now(), model, prompt_tokens, output_tokens),
+    )
+
+
+def get_setting(guild_id: int, key: str) -> Optional[str]:
+    row = one("SELECT value FROM settings WHERE guild_id=? AND key=?", (guild_id, key))
+    return row["value"] if row else None
+
+
+def set_setting(guild_id: int, key: str, value: Optional[str]) -> None:
+    connect().execute(
+        "INSERT INTO settings (guild_id, key, value) VALUES (?, ?, ?) "
+        "ON CONFLICT(guild_id, key) DO UPDATE SET value=excluded.value",
+        (guild_id, key, value),
     )
 
 

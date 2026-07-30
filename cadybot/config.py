@@ -1,4 +1,4 @@
-"""Environment-backed configuration. Nothing here talks to Discord or Claude."""
+"""Environment-backed configuration. Nothing here talks to Discord or a model."""
 
 import os
 from pathlib import Path
@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 
-def _int(name: str) -> Optional[int]:
+def _int(name: str, default: Optional[int] = None) -> Optional[int]:
     raw = (os.getenv(name) or "").strip()
-    return int(raw) if raw else None
+    return int(raw) if raw else default
 
 
 def _required_int(name: str) -> int:
@@ -26,15 +26,28 @@ def _required_int(name: str) -> int:
 DISCORD_TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
 GUILD_ID = _int("GUILD_ID")
 OWNER_ID = _int("OWNER_ID")
-STAFF_CHANNEL_ID = _int("STAFF_CHANNEL_ID")
 
 DB_PATH = ROOT / (os.getenv("CADYBOT_DB") or "cadybot.db")
 CONTEXT_DIR = ROOT / "context"
 PLAYBOOK_DIR = ROOT / "playbooks"
 
+# The private channel cadybot creates and manages. It is the only channel in the
+# server cadybot is permitted to write to, and its member list is yours to edit.
+ROOM_NAME = (os.getenv("CADYBOT_ROOM") or "cadybot").strip().lower()
+
+# "ollama" for local inference, "anthropic" for Claude.
+BACKEND = (os.getenv("CADYBOT_BACKEND") or "ollama").strip().lower()
+
 # Opus 5 defaults to `effort: high` and to thinking on, which is what we want
 # here, so neither is passed explicitly.
 MODEL = os.getenv("CADYBOT_MODEL") or "claude-opus-5"
+
+OLLAMA_HOST = (os.getenv("CADYBOT_OLLAMA_HOST") or "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = os.getenv("CADYBOT_OLLAMA_MODEL") or "gemma4:e4b"
+# Ollama's default context is small enough to silently truncate the system
+# prompt. A truncated stage gate is worse than none at all.
+OLLAMA_NUM_CTX = _int("CADYBOT_OLLAMA_NUM_CTX", 16384)
+OLLAMA_TIMEOUT = _int("CADYBOT_OLLAMA_TIMEOUT", 600)
 
 # A member who has not posted in this many days counts as gone quiet.
 QUIET_DAYS = 14

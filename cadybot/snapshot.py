@@ -11,7 +11,7 @@ Retention cohorts and DAU/MAU are deliberately absent: at n=7 they are noise.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from . import config, db
+from . import config, db, room
 
 
 def _stage(humans: int) -> str:
@@ -122,23 +122,27 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         if age is not None and age >= config.QUIET_DAYS:
             gone_quiet.append({"member": _name(m), "silent_days": age})
 
-    msgs_7 = db.scalar(
-        "SELECT COUNT(*) FROM messages WHERE guild_id=? AND created_at>=?",
-        (guild_id, db.days_ago(7)),
+    # Bots are excluded from activity counts: a chatty bot is not a lively
+    # server, and counting its output would hide exactly the problem we care
+    # about.
+    HUMAN = (
+        "FROM messages m LEFT JOIN members mem "
+        "  ON mem.guild_id = m.guild_id AND mem.user_id = m.author_id "
+        "WHERE m.guild_id=? AND COALESCE(mem.is_bot,0)=0 AND m.created_at>=?"
     )
-    msgs_30 = db.scalar(
-        "SELECT COUNT(*) FROM messages WHERE guild_id=? AND created_at>=?",
-        (guild_id, db.days_ago(30)),
-    )
+    msgs_7 = db.scalar("SELECT COUNT(*) " + HUMAN, (guild_id, db.days_ago(7)))
+    msgs_30 = db.scalar("SELECT COUNT(*) " + HUMAN, (guild_id, db.days_ago(30)))
     posters_7 = db.scalar(
-        "SELECT COUNT(DISTINCT author_id) FROM messages WHERE guild_id=? AND created_at>=?",
-        (guild_id, db.days_ago(7)),
+        "SELECT COUNT(DISTINCT m.author_id) " + HUMAN, (guild_id, db.days_ago(7))
     )
     owner_msgs_7 = db.scalar(
         "SELECT COUNT(*) FROM messages WHERE guild_id=? AND author_id=? AND created_at>=?",
         (guild_id, owner_id, db.days_ago(7)),
     )
 
+    # cadybot's own private channel is not part of the server's life; counting
+    # its briefs as activity would let it flatter itself.
+    private_id = room.stored_id(guild_id) or -1
     channels = [
         {
             "channel": r["name"],
@@ -157,11 +161,11 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
             LEFT JOIN messages m
               ON m.guild_id = c.guild_id AND m.channel_id = c.channel_id
               AND m.created_at >= ?
-            WHERE c.guild_id = ?
+            WHERE c.guild_id = ? AND c.channel_id != ?
             GROUP BY c.channel_id
             ORDER BY msgs DESC
             """,
-            (db.days_ago(30), guild_id),
+            (db.days_ago(30), guild_id, private_id),
         )
     ]
 

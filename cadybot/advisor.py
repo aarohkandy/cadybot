@@ -1,37 +1,28 @@
-"""Claude calls.
+"""What to ask the model, and how to render what comes back.
 
-Two entry points: `ask` (a direct verdict on one question) and `brief` (ranked
-recommendations). Both take the deterministic snapshot as input — Claude is only
-ever asked to interpret numbers, never to produce them.
+Two entry points: `ask` (a verdict on one question) and `brief` (ranked
+recommendations). Both take the deterministic snapshot as input — the model is
+only ever asked to interpret numbers, never to produce them.
 
-Structured output goes through `client.messages.parse()` with Pydantic models, so
-a malformed response is impossible rather than merely unlikely.
+Output is schema-constrained on both backends, so a malformed response is
+rejected rather than merely unlikely.
 """
 
 import json
 from typing import Any, Dict, List, Literal, Optional
 
-import anthropic
 from pydantic import BaseModel, Field
 
-from . import config, db, prompts
+from . import config, db, llm, prompts
 
-_client: Optional[anthropic.Anthropic] = None
-
-MAX_TOKENS = 8000
-
-
-def client() -> anthropic.Anthropic:
-    """A bare constructor also picks up an `ant auth login` profile."""
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic()
-    return _client
+# Re-exported so callers catch one name regardless of backend.
+Refused = llm.Refused
+BackendError = llm.BackendError
 
 
 class Verdict(BaseModel):
     # Literal becomes a JSON Schema enum, so an invalid verdict is rejected by
-    # the API rather than merely discouraged by the description.
+    # the decoder rather than merely discouraged by the description.
     verdict: Literal["yes", "no", "not_yet"]
     reason: str = Field(description="At most three sentences, citing a number or name.")
     instead: Optional[str] = Field(
@@ -55,56 +46,32 @@ class Brief(BaseModel):
     follow_up: Optional[str] = None
 
 
-class Refused(Exception):
-    """Claude's safety classifiers declined the request."""
-
-
-def _call(schema, instruction: str, snap: Dict[str, Any], question: Optional[str], kind: str):
-    """One request. The stable prefix is cached; the volatile part goes last.
-
-    Server-side refusal fallbacks would need the beta `messages.create` path,
-    which does not carry Pydantic validation. For a Discord growth advisor a
-    refusal is effectively impossible, so this trades that safety net for
-    guaranteed-valid output and handles the refusal explicitly instead.
-    """
-    turn = [
+def _turn(instruction: str, snap: Dict[str, Any], question: Optional[str]) -> str:
+    parts = [
         instruction,
         "# Server snapshot\n\n```json\n%s\n```" % json.dumps(snap, indent=2, default=str),
     ]
     if question:
-        turn.append("# The founder's question\n\n%s" % question)
-
-    response = client().messages.parse(
-        model=config.MODEL,
-        max_tokens=MAX_TOKENS,
-        system=prompts.stable_prefix(),
-        messages=[{"role": "user", "content": "\n\n".join(turn)}],
-        output_format=schema,
-    )
-
-    if response.stop_reason == "refusal":
-        raise Refused(
-            "Claude declined this request (%s). Nothing was billed."
-            % getattr(response.stop_details, "category", "unknown")
-        )
-    if response.stop_reason == "max_tokens":
-        raise RuntimeError("Response hit max_tokens; raise MAX_TOKENS in advisor.py.")
-
-    if config.GUILD_ID:
-        db.record_run(config.GUILD_ID, kind, response.usage, config.MODEL)
-
-    parsed = response.parsed_output
-    if parsed is None:
-        raise RuntimeError("Claude returned no parseable output.")
-    return parsed
+        parts.append("# The founder's question\n\n%s" % question)
+    return "\n\n".join(parts)
 
 
 def ask(question: str, snap: Dict[str, Any]) -> Verdict:
-    return _call(Verdict, prompts.ASK_INSTRUCTION, snap, question, "ask")
+    return llm.generate(
+        prompts.stable_prefix(),
+        _turn(prompts.ASK_INSTRUCTION, snap, question),
+        Verdict,
+        "ask",
+    )
 
 
 def brief(snap: Dict[str, Any]) -> Brief:
-    result = _call(Brief, prompts.BRIEF_INSTRUCTION, snap, None, "brief")
+    result = llm.generate(
+        prompts.stable_prefix(),
+        _turn(prompts.BRIEF_INSTRUCTION, snap, None),
+        Brief,
+        "brief",
+    )
     if config.GUILD_ID:
         db.save_recommendations(
             config.GUILD_ID, [r.model_dump() for r in result.recommendations]
@@ -123,6 +90,7 @@ def render_verdict(v: Verdict) -> str:
         lines += ["", "**Instead:** %s" % v.instead]
     if v.confidence == "low":
         lines += ["", "_Low confidence — not enough data yet to be sure._"]
+    lines += ["", "_%s_" % llm.describe()]
     return "\n".join(lines)
 
 
@@ -139,5 +107,6 @@ def render_brief(b: Brief) -> str:
     if b.dont:
         lines += ["**Don't:** %s" % b.dont, ""]
     if b.follow_up:
-        lines += ["**Last time:** %s" % b.follow_up]
+        lines += ["**Last time:** %s" % b.follow_up, ""]
+    lines += ["_%s_" % llm.describe()]
     return "\n".join(lines).strip()

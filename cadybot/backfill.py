@@ -71,7 +71,7 @@ async def _threads(channel) -> List[discord.Thread]:
     return found
 
 
-async def run(guild: discord.Guild) -> int:
+async def run(guild: discord.Guild, skip_channel_id: Optional[int] = None) -> int:
     total = 0
 
     for member in guild.members:
@@ -85,6 +85,8 @@ async def run(guild: discord.Guild) -> int:
         )
 
     for channel in guild.channels:
+        if skip_channel_id is not None and channel.id == skip_channel_id:
+            continue  # cadybot's own console is not server activity
         if not isinstance(channel, TEXTLIKE):
             db.upsert_channel(
                 guild.id,

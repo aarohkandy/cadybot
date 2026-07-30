@@ -1,16 +1,16 @@
 """Delivery. The only module allowed to send anything.
 
-Every send goes through `_guard`, which permits exactly two destinations: a DM to
-the owner, and the one configured staff channel. Nothing else can be written to,
-which is what makes "never posts in the server" a structural property rather
-than a promise.
+Every send passes `_guard`, which permits exactly two destinations: a DM, and
+the private channel cadybot created. Every other channel in the server raises.
+That is what makes "never posts in the server" a property of the code rather
+than a thing we remembered to do.
 """
 
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 import discord
 
-from . import config
+from . import config, room
 
 LIMIT = 1900  # Discord's cap is 2000; leave room for fence characters
 
@@ -25,15 +25,21 @@ def _guard(destination) -> None:
         if recipient is None or recipient.id == config.OWNER_ID:
             return
         raise WriteBlocked("cadybot may only DM the owner.")
-    if config.STAFF_CHANNEL_ID and getattr(destination, "id", None) == config.STAFF_CHANNEL_ID:
-        return
+
+    guild = getattr(destination, "guild", None)
+    if guild is not None:
+        allowed = room.stored_id(guild.id)
+        if allowed and getattr(destination, "id", None) == allowed:
+            return
+
     raise WriteBlocked(
-        "cadybot is read-only in servers. Refusing to write to %r." % destination
+        "cadybot is read-only outside its own channel. Refusing to write to %r."
+        % getattr(destination, "name", destination)
     )
 
 
 def chunk(text: str, limit: int = LIMIT) -> List[str]:
-    """Split on paragraph, then line, then hard-cut. Never mid-word if avoidable."""
+    """Split on paragraph, then line, then word. Never mid-word if avoidable."""
     out: List[str] = []
     remaining = text.strip()
     while len(remaining) > limit:
@@ -58,20 +64,19 @@ async def send(destination, text: str) -> None:
         await destination.send(part)
 
 
-async def deliver(bot: discord.Client, text: str, also_staff: bool = True) -> None:
-    """DM the owner, and mirror to the staff channel if one is configured."""
-    targets: List[object] = []
+async def deliver(bot: discord.Client, text: str, dm_only: bool = False) -> None:
+    """Post to the private channel; fall back to a DM if it isn't reachable."""
+    guild = bot.get_guild(config.GUILD_ID) if config.GUILD_ID else None
+
+    if not dm_only and guild is not None:
+        channel_id = room.stored_id(guild.id)
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel is not None:
+            await send(channel, text)
+            return
 
     owner = bot.get_user(config.OWNER_ID) if config.OWNER_ID else None
     if owner is None and config.OWNER_ID:
         owner = await bot.fetch_user(config.OWNER_ID)
     if owner is not None:
-        targets.append(await owner.create_dm())
-
-    if also_staff and config.STAFF_CHANNEL_ID:
-        channel = bot.get_channel(config.STAFF_CHANNEL_ID)
-        if channel is not None:
-            targets.append(channel)
-
-    for target in targets:
-        await send(target, text)
+        await send(await owner.create_dm(), text)

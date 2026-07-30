@@ -1,13 +1,14 @@
 """The Discord client.
 
-Joins, leaves, and voice presence exist only as live gateway events — they cannot
-be recovered from Discord after the fact. That makes this the one part of cadybot
-worth running before anything else is built.
+Joins, leaves, and voice presence exist only as live gateway events — they
+cannot be recovered from Discord after the fact. That makes this the one part of
+cadybot worth running before anything else is built.
 
 Message content is never written to logs, only IDs and counts.
 """
 
 import asyncio
+import json
 import traceback
 from datetime import time as dtime
 from typing import Dict, Optional
@@ -15,7 +16,7 @@ from typing import Dict, Optional
 import discord
 from discord.ext import tasks
 
-from . import advisor, backfill, config, db, notify, snapshot
+from . import advisor, backfill, config, db, llm, notify, room, snapshot
 
 INTENTS = discord.Intents.none()
 INTENTS.guilds = True
@@ -27,12 +28,16 @@ INTENTS.guild_reactions = True
 INTENTS.voice_states = True
 
 HELP = (
-    "**cadybot**\n"
     "`ask <question>` — a straight yes / no / not-yet\n"
     "`brief` — what to do this week\n"
     "`snapshot` — the raw numbers, no interpretation\n"
-    "`backfill` — re-import history"
+    "`who` — who can see this channel\n"
+    "`add @someone` / `remove @someone` — change that (owner only)\n"
+    "`backfill` — re-import history (owner only)"
 )
+
+KNOWN = ("ask", "brief", "snapshot", "who", "add", "remove", "backfill")
+OWNER_ONLY = ("add", "remove", "backfill")
 
 
 class Cadybot(discord.Client):
@@ -40,6 +45,7 @@ class Cadybot(discord.Client):
         super().__init__(intents=INTENTS)
         self.backfill_on_start = backfill_on_start
         self._invite_uses: Dict[str, int] = {}
+        self._room_id: Optional[int] = None
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -71,11 +77,25 @@ class Cadybot(discord.Client):
             )
         await self._refresh_invites(guild)
 
+        try:
+            channel = await room.ensure(guild)
+            self._room_id = channel.id
+            print("private channel: #%s (%s)" % (channel.name, channel.id))
+        except room.RoomError as exc:
+            print("Could not set up the private channel: %s" % exc)
+            print("Falling back to DMs.")
+
         print("cadybot listening to %s (%d members)" % (guild.name, guild.member_count))
+        print("backend: %s" % llm.describe())
+
+        problem = llm.preflight()
+        if problem:
+            print("WARNING: %s" % problem)
+            await notify.deliver(self, "Backend problem: %s" % problem)
 
         if self.backfill_on_start:
             print("Backfilling history...")
-            total = await backfill.run(guild)
+            total = await backfill.run(guild, skip_channel_id=self._room_id)
             print("Backfill complete: %d messages." % total)
 
         if not self.weekly_brief.is_running():
@@ -103,12 +123,21 @@ class Cadybot(discord.Client):
     # --- ingest ------------------------------------------------------------
 
     async def on_message(self, message: discord.Message) -> None:
+        if message.author.id == self.user.id:
+            return
+
         if message.guild is None:
             if message.author.id == config.OWNER_ID:
                 await self._command(message)
             return
 
         if message.guild.id != config.GUILD_ID:
+            return
+
+        # The private channel is a console, not part of the server's life. Its
+        # messages are never stored, so they can never inflate the snapshot.
+        if message.channel.id == self._room_id:
+            await self._command(message)
             return
 
         db.upsert_member(
@@ -134,11 +163,11 @@ class Cadybot(discord.Client):
         )
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id == config.GUILD_ID:
+        if payload.guild_id == config.GUILD_ID and payload.channel_id != self._room_id:
             db.bump_reactions(payload.guild_id, payload.message_id, 1)
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id == config.GUILD_ID:
+        if payload.guild_id == config.GUILD_ID and payload.channel_id != self._room_id:
             db.bump_reactions(payload.guild_id, payload.message_id, -1)
 
     async def on_member_join(self, member: discord.Member) -> None:
@@ -183,50 +212,124 @@ class Cadybot(discord.Client):
             db.close_voice(member.guild.id, member.id)
             db.open_voice(member.guild.id, after.channel.id, member.id)
 
-    # --- owner commands over DM -------------------------------------------
+    # --- commands ----------------------------------------------------------
 
     async def _command(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
         raw = (message.content or "").strip()
-        lowered = raw.lower()
+        if not raw:
+            return
+
+        verb = raw.split(" ", 1)[0].lower()
+        rest = raw[len(verb):].strip(" :")
         channel = message.channel
+        is_owner = message.author.id == config.OWNER_ID
+
+        if verb in ("help", "h", "?", "commands"):
+            await notify.send(channel, HELP)
+            return
+
+        # Anything that isn't a command is left alone, so the channel stays
+        # usable as an actual conversation rather than a command prompt that
+        # barks the help text at every message.
+        if verb not in KNOWN:
+            return
+
+        if verb in OWNER_ONLY and not is_owner:
+            await notify.send(channel, "Only the owner can do that.")
+            return
 
         try:
-            if lowered.startswith("ask"):
-                question = raw[3:].strip(" :")
-                if not question:
+            if verb == "ask":
+                if not rest:
                     await notify.send(channel, "Ask me something. `ask would a weekly event help?`")
                     return
                 async with channel.typing():
                     snap = snapshot.build()
-                    verdict = await asyncio.to_thread(advisor.ask, question, snap)
+                    verdict = await asyncio.to_thread(advisor.ask, rest, snap)
                 await notify.send(channel, advisor.render_verdict(verdict))
 
-            elif lowered.startswith("brief"):
+            elif verb == "brief":
                 async with channel.typing():
                     snap = snapshot.build()
                     result = await asyncio.to_thread(advisor.brief, snap)
                 await notify.send(channel, advisor.render_brief(result))
 
-            elif lowered.startswith("snapshot"):
-                import json
-
+            elif verb == "snapshot":
                 snap = snapshot.build()
-                await notify.send(channel, "```json\n%s\n```" % json.dumps(snap, indent=2, default=str))
+                await notify.send(
+                    channel, "```json\n%s\n```" % json.dumps(snap, indent=2, default=str)
+                )
 
-            elif lowered.startswith("backfill"):
+            elif verb == "who":
+                await self._who(message)
+
+            elif verb in ("add", "remove"):
+                await self._membership(message, verb)
+
+            elif verb == "backfill":
                 guild = self.get_guild(config.GUILD_ID)
                 await notify.send(channel, "Backfilling...")
-                total = await backfill.run(guild)
+                total = await backfill.run(guild, skip_channel_id=self._room_id)
                 await notify.send(channel, "Imported %d messages." % total)
 
-            else:
-                await notify.send(channel, HELP)
-
-        except advisor.Refused as exc:
+        except (advisor.Refused, advisor.BackendError, room.RoomError) as exc:
             await notify.send(channel, str(exc))
         except Exception:
             traceback.print_exc()
             await notify.send(channel, "That failed. Check the listener log.")
+
+    async def _room_channel(self) -> Optional[discord.TextChannel]:
+        guild = self.get_guild(config.GUILD_ID)
+        if guild is None or self._room_id is None:
+            return None
+        return guild.get_channel(self._room_id)
+
+    async def _who(self, message: discord.Message) -> None:
+        channel = await self._room_channel()
+        if channel is None:
+            await notify.send(message.channel, "No private channel set up yet.")
+            return
+        names = room.roster(channel)
+        await notify.send(
+            message.channel,
+            "Can see #%s: %s" % (channel.name, ", ".join(names) if names else "just cadybot"),
+        )
+
+    async def _membership(self, message: discord.Message, verb: str) -> None:
+        channel = await self._room_channel()
+        if channel is None:
+            await notify.send(message.channel, "No private channel set up yet.")
+            return
+
+        targets = list(message.mentions)
+        if not targets:
+            await notify.send(message.channel, "Mention someone: `%s @user`" % verb)
+            return
+
+        guild = channel.guild
+        done = []
+        for user in targets:
+            member = guild.get_member(user.id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user.id)
+                except discord.NotFound:
+                    await notify.send(message.channel, "%s isn't in this server." % user)
+                    continue
+            if verb == "add":
+                await room.add(channel, member)
+            else:
+                await room.remove(channel, member)
+            done.append(member.display_name)
+
+        if done:
+            await notify.send(
+                message.channel,
+                "%s %s." % ("Added" if verb == "add" else "Removed", ", ".join(done)),
+            )
 
     # --- schedules ---------------------------------------------------------
 
@@ -256,7 +359,7 @@ class Cadybot(discord.Client):
                     "%s in #%s, %s days ago: %s\n%s"
                     % (q["author"], q["channel"], q["asked_days_ago"], q["text"][:180], q["link"])
                 )
-            await notify.deliver(self, "\n\n".join(lines), also_staff=False)
+            await notify.deliver(self, "\n\n".join(lines))
         except Exception:
             traceback.print_exc()
 
