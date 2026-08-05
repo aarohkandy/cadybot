@@ -17,6 +17,7 @@ import os
 import pathlib
 import random
 import sys
+import discord
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -102,6 +103,30 @@ class Build:
     def voice(self, uid, cid=9999):
         db.open_voice(self.g, cid, uid)
         db.close_voice(self.g, uid)
+        return self
+
+    def mention(self, message_id, author, targets):
+        db.add_mentions(self.g, message_id, author, targets, ts(0))
+        return self
+
+    def react(self, message_id, uid, emoji="thumbsup"):
+        db.add_reaction(self.g, message_id, uid, emoji)
+        return self
+
+    def thread(self, cid, name, parent, archived=0, messages=0, auto_archive=1440):
+        db.upsert_channel(
+            self.g, cid, name, "Thread", parent, ts(20), archived=archived,
+            auto_archive_duration=auto_archive, thread_message_count=messages,
+            parent_kind="TextChannel",
+        )
+        return self
+
+    def audit(self, entry_id, action, target, days_ago=1):
+        db.record_audit_event(self.g, entry_id, int(action.value), 1, target, ts(days_ago))
+        return self
+
+    def facts(self, **kw):
+        db.upsert_guild_facts(self.g, kw)
         return self
 
 
@@ -321,6 +346,75 @@ def no_history_yet(b):
         "activity.messages_30d": 0,
         "members.never_posted.count": 80,
         "members.gone_quiet.count": 0,
+    }
+
+
+@scenario("moderation_wave", "Fifty departures — but forty were bans, not churn.", advice=True)
+def moderation_wave(b):
+    """The distinction that flips the advice.
+
+    Fifty people leaving looks identical to fifty people being removed unless
+    the audit log is read. One means the community is failing; the other means
+    it is being defended. Without moderation_30d an advisor confidently
+    diagnoses churn and prescribes retention work for a raid cleanup.
+    """
+    b.members(120).owner(1).channel(10, "general")
+    b.chatter(list(range(1, 60)), [10], 200)
+    for i, u in enumerate(range(61, 111)):
+        b.leave(u)
+        db.mark_left(b.g, u)
+        if i < 40:
+            b.audit(1000 + i, discord.AuditLogAction.ban, u, days_ago=2)
+    return {
+        "membership_flow_30d.leaves": 50,
+        "moderation_30d.bans": 40,
+        "moderation_30d.kicks": 0,
+    }
+
+
+@scenario("thread_culture", "A forum-shaped server where threads die young.")
+def thread_culture(b):
+    b.members(80).owner(1).channel(10, "help")
+    for i in range(12):
+        b.thread(200 + i, "thread-%d" % i, 10, archived=1 if i < 10 else 0, messages=2 + i % 3)
+    b.chatter(list(range(1, 60)), [10], 120)
+    return {
+        "threads.total": 12,
+        "threads.archived": 10,
+        "threads.still_active": 2,
+        "threads.median_messages_in_archived": lambda v: v is not None,
+        # No archiver_id column exists, so this must stay honestly unknown
+        # rather than guessing that every archive was a timeout.
+        "threads.archived_by_timeout.value": None,
+    }
+
+
+@scenario("owner_shouting", "Only the founder ever @-mentions anyone.")
+def owner_shouting(b):
+    b.members(30).owner(1).channel(10, "general")
+    for d in range(0, 12):
+        mid = b.msg(1, 10, d, "hey @u%d take a look" % (d + 2))
+        b.mention(mid, 1, [d + 2])
+    mid = b.msg(5, 10, 3, "nice")
+    b.react(mid, 1)
+    return {
+        "structure.mentions_30d": 12,
+        # Nobody but the founder pulls anyone in — a community of one hub.
+        "structure.mentioned_only_by_owner.count": lambda v: v >= 10,
+        "structure.reciprocity": None,
+    }
+
+
+@scenario("config_unreadable", "Permissions missing: unknown must not read as zero.")
+def config_unreadable(b):
+    b.members(40).owner(1).channel(10, "general")
+    b.chatter(list(range(1, 40)), [10], 60)
+    b.facts(onboarding_enabled=1, onboarding_readable=1)
+    return {
+        # Readable fact comes back bare; unreadable ones carry a reason. The
+        # whole NULL-means-unreadable design fails silently if these collapse.
+        "server_config.onboarding_enabled": 1,
+        "server_config.onboarding_mode": lambda v: isinstance(v, dict) and v["value"] is None and v["reason"],
     }
 
 
