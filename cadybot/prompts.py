@@ -154,10 +154,14 @@ The founder asked you a direct question. Give a direct verdict.
 
 Default to "no" or "not_yet" on anything a stage gate forbids.
 
-`reason` is at most three sentences and cites a number or name from the snapshot.
+`reasoning` is your working, and it comes first because you are writing it
+before you have committed to an answer. `evidence` is at most three sentences,
+cites a number or name from the snapshot, and is the part the founder reads.
+`would_change_my_mind` is the specific fact or number that would flip the call.
 `instead` is what to do with that energy instead — required unless the verdict is
 "yes". Make it a concrete action the founder could do today, not a direction.
-`confidence` is "low" when the snapshot is too thin to support the call.
+`confidence` is "low" when the snapshot is too thin to support the call, and
+`confidence_pct` is the same judgment as a number between 0 and 100.
 """
 
 CHAT_INSTRUCTION = """\
@@ -189,16 +193,21 @@ business. Fewer is better; two good ones beat three padded ones. If there is
 genuinely only one thing worth doing, return one.
 
 Each recommendation needs:
+- `evidence`   — the number, name, or message from the snapshot that justifies it.
+- `reasoning`  — why this is the highest-value move right now.
+- `would_change_my_mind` — what you would have to see to withdraw it.
+- `play_fails_when`      — the condition under which this play backfires.
 - `headline`   — the imperative, one line.
 - `action`     — exactly what to do, specific enough to do today without thinking.
-- `evidence`   — the number, name, or message from the snapshot that justifies it.
-- `metric`     — the single number that should move if this works.
-- `prediction` — what you expect to happen, so you can be checked later.
+- `metric`, `direction`, `horizon_days`, `guardrail_metric` — the commitment.
+  These are described in full below; the rules there are binding.
 
 `dont` is one thing the founder is likely tempted to do that they should not do
 right now, with a one-line reason. Skip it only if nothing qualifies.
 
-If `past_recommendations` shows advice you gave before, say in `follow_up`
-whether it appears to have worked, based on the numbers. If you can't tell, say
-you can't tell.
+Whether earlier advice worked is not yours to say. Verdicts on past
+recommendations are computed from the numbers by code, arrive already decided,
+and are rendered above your brief. Do not assess, re-grade, or allude to how
+your own previous advice turned out — there is no field for it and no version of
+it that belongs in your text.
 """

@@ -166,8 +166,10 @@ REFRAME = (
     "the original phrasing."
 )
 
-# Overrides the paragraph in BRIEF_INSTRUCTION that asks the model to assess its
-# own past advice, and describes the fields that replaced `prediction`.
+# The binding detail behind the four commitment fields BRIEF_INSTRUCTION names
+# but does not spell out. It lives here rather than in prompts.py because every
+# rule in it is a property of the schema and of scorecard.py, so the two have to
+# be edited together or not at all.
 BRIEF_SCHEMA_NOTE = """\
 # How a recommendation commits itself
 

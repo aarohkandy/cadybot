@@ -496,6 +496,12 @@ def _server_config(guild_id: int, humans_present: int) -> Dict[str, Any]:
         "boost_tier": fact("boost_tier"),
         "verification_level": fact("verification_level"),
         "is_community": fact("is_community"),
+        # The two flags that say which of the nulls above are permission
+        # failures rather than settings cadybot has not looked at yet. Written
+        # by the listener since ingest landed and never surfaced until now, so
+        # every unreadable fact came out with the same generic reason.
+        "onboarding_readable": fact("onboarding_readable"),
+        "audit_readable": fact("audit_readable"),
     }
 
     # Onboarding completion is absent, not 0%, when onboarding is off: a server
@@ -558,6 +564,45 @@ def _server_config(guild_id: int, humans_present: int) -> Dict[str, Any]:
             "no presence samples in the last 7 days" if facts is not None else NOT_SAMPLED
         )
     return out
+
+
+# Discord's AuditLogAction values for the moderation slice listener.py stores.
+# The numbers are restated rather than imported: this file must stay runnable
+# without discord.py so the harness can build a snapshot from a bare database.
+AUDIT_ACTIONS = (("kicks", 20), ("prunes", 21), ("bans", 22), ("unbans", 23),
+                 ("automod_blocks", 143))
+
+
+def _moderation(guild_id: int) -> Dict[str, Any]:
+    """Departures somebody caused, separated from departures that just happened.
+
+    membership_flow_30d counts leaves and cannot tell why. Sixty people leaving
+    a server is a crisis; sixty people being banned in the same window is a raid
+    that was dealt with, and the advice for the two is opposite. This is the only
+    thing that distinguishes them, and cadybot has been recording it since ingest
+    landed without anything reading it back.
+    """
+    since = db.days_ago(30)
+    readable = db.scalar(
+        "SELECT audit_readable FROM guild_facts WHERE guild_id = ?",
+        (guild_id,),
+        default=None,
+    )
+    if readable == 0:
+        return {"available": False, "reason": NO_PERMISSION}
+    counts = {
+        name: db.scalar(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE guild_id = ? AND action = ? AND at >= ?",
+            (guild_id, action, since),
+        )
+        for name, action in AUDIT_ACTIONS
+    }
+    counts["note"] = (
+        "Counted from the audit log, which only exists from logging_since "
+        "onward and only covers kicks, prunes, bans, unbans and automod blocks."
+    )
+    return counts
 
 
 def _retention_bracket(guild_id: int, logging_since: Optional[str]) -> Dict[str, Any]:
@@ -959,6 +1004,7 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         ("threads", _threads(guild_id)),
         ("structure", _structure(guild_id, owner_id, posters_30)),
         ("membership_flow_30d", flow),
+        ("moderation_30d", _moderation(guild_id)),
         ("retention_bracket", _retention_bracket(guild_id, logging_since)),
         ("lurker_conversion", _lurker_conversion(guild_id, logging_since)),
         ("invite_attribution", _capped(invites, SAMPLE_CHANNELS)),

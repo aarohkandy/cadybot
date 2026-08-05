@@ -22,7 +22,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from . import advisor, backfill, config, db, llm, notify, room, snapshot
+from . import advisor, backfill, config, db, llm, loop, notify, room, snapshot
 
 INTENTS = discord.Intents.none()
 INTENTS.guilds = True
@@ -466,11 +466,13 @@ class Cadybot(discord.Client):
             if not self._rooms.get(guild.id):
                 continue
             try:
-                snap = snapshot.build(guild.id)
-                result = await asyncio.to_thread(advisor.brief, snap, guild.id)
-                await notify.deliver(
-                    self, guild.id, "**Weekly brief**\n\n" + advisor.render_brief(result)
-                )
+                # loop.weekly rather than advisor.brief directly: grading has to
+                # happen, and has to be committed, before a model is asked to
+                # narrate anything. Calling the advisor from here skipped
+                # scorecard.score entirely, so every pre-registered
+                # recommendation stayed open forever and the scorecard the brief
+                # renders was permanently empty.
+                await loop.weekly(self, guild.id)
             except Exception:
                 traceback.print_exc()
 
@@ -482,16 +484,21 @@ class Cadybot(discord.Client):
                 continue
             try:
                 pending = snapshot.unanswered_questions(guild.id, room.owner_id(guild.id) or 0)
-                if not pending:
-                    continue
-                lines = ["**%d unanswered question(s).**" % len(pending), ""]
-                for q in pending[:5]:
-                    lines.append(
-                        "%s in #%s, %s days ago: %s\n%s"
-                        % (q["author"], q["channel"], q["asked_days_ago"],
-                           q["text"][:180], q["link"])
-                    )
-                await notify.deliver(self, guild.id, "\n\n".join(lines))
+                if pending:
+                    lines = ["**%d unanswered question(s).**" % len(pending), ""]
+                    for q in pending[:5]:
+                        lines.append(
+                            "%s in #%s, %s days ago: %s\n%s"
+                            % (q["author"], q["channel"], q["asked_days_ago"],
+                               q["text"][:180], q["link"])
+                        )
+                    await notify.deliver(self, guild.id, "\n\n".join(lines))
+                # Separate from the alert above and never skipped because of it:
+                # this is the pass that closes recommendations whose horizon has
+                # run out. Weekly-only grading would leave a 14-day bet unjudged
+                # for up to another week. It stays quiet unless a verdict landed
+                # or a watched number actually moved.
+                await loop.nightly(self, guild.id)
             except Exception:
                 traceback.print_exc()
 

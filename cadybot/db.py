@@ -6,6 +6,7 @@ strings, which sort lexicographically — that is the only reason they are text.
 """
 
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -275,19 +276,34 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-_conn: Optional[sqlite3.Connection] = None
+# One connection per thread rather than one per process. Everything slow in
+# cadybot — a model call and the database work either side of it — runs on a
+# worker thread so the gateway heartbeat keeps beating, and Python's sqlite3
+# refuses to serve a connection to a thread that did not create it. A single
+# shared connection therefore made every /ask, /brief and private-channel reply
+# die with ProgrammingError the moment it touched the database from that thread.
+#
+# check_same_thread=False plus one shared connection is the other way to spell
+# this and is not safe here: sqlite is compiled THREADSAFE=2, which permits many
+# connections but not one connection used concurrently, and gateway ingest on
+# the event loop genuinely overlaps a brief being written on a worker. Separate
+# connections over WAL is the arrangement sqlite supports — readers never block,
+# and busy_timeout absorbs the one-writer-at-a-time window.
+_local = threading.local()
 
 
 def connect() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(str(config.DB_PATH), isolation_level=None)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA foreign_keys=ON")
-        _conn.executescript(SCHEMA)
-        _migrate(_conn)
-    return _conn
+    conn: Optional[sqlite3.Connection] = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(str(config.DB_PATH), isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.executescript(SCHEMA)
+        _migrate(conn)
+        _local.conn = conn
+    return conn
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -319,6 +335,18 @@ def _sweep_thread_starters(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM settings WHERE guild_id=0 AND key=?", (CLEANUP_KEY,)
     ).fetchone():
         return
+    doomed = (
+        "SELECT guild_id, message_id FROM messages WHERE content IS NULL "
+        "AND attachments = 0 AND reply_to_id IS NOT NULL"
+    )
+    # Cascade the same way delete_messages does. Dropping only the message rows
+    # would strand their mentions, and structure.mentions_30d counts mentions
+    # rows directly — it would keep reporting @-mentions belonging to messages
+    # that no longer exist.
+    for table in ("mentions", "reactions"):
+        conn.execute(
+            "DELETE FROM %s WHERE (guild_id, message_id) IN (%s)" % (table, doomed)
+        )
     removed = conn.execute(
         "DELETE FROM messages WHERE content IS NULL AND attachments = 0 "
         "AND reply_to_id IS NOT NULL"
