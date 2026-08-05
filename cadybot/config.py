@@ -54,7 +54,22 @@ OLLAMA_NUM_CTX = _int("CADYBOT_OLLAMA_NUM_CTX", 16384)
 OLLAMA_TIMEOUT = _int("CADYBOT_OLLAMA_TIMEOUT", 600)
 # How long Ollama keeps the model in memory after a request. The default is 5
 # minutes, which means most questions pay a multi-GB reload before answering.
-OLLAMA_KEEP_ALIVE = os.getenv("CADYBOT_OLLAMA_KEEP_ALIVE") or "30m"
+def _keep_alive():
+    """Ollama's keep_alive, as a number of seconds when it is one.
+
+    Sent as the JSON string "0" this is parsed as a duration, fails, and Ollama
+    silently applies its five-minute default — so the setting that is supposed
+    to free several gigabytes does the opposite of nothing. A bare integer is
+    unambiguous; anything else ("30m", "1h") passes through untouched.
+    """
+    raw = (os.getenv("CADYBOT_OLLAMA_KEEP_ALIVE") or "30m").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+OLLAMA_KEEP_ALIVE = _keep_alive()
 
 # A member who has not posted in this many days counts as gone quiet.
 QUIET_DAYS = 14

@@ -247,6 +247,11 @@ def warm() -> None:
     """
     if config.BACKEND != "ollama":
         return
+    # Warming is a trade: hold memory now to save a reload later. At keep_alive
+    # 0 there is no later — the model unloads the moment this call returns — so
+    # warming would allocate several gigabytes purely to free them again.
+    if config.OLLAMA_KEEP_ALIVE in (0, "0"):
+        return
     try:
         httpx.post(
             "%s/api/generate" % config.OLLAMA_HOST,
