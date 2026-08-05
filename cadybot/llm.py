@@ -173,40 +173,14 @@ def describe(backend: Optional[str] = None) -> str:
     return config.MODEL
 
 
-def alternate(backend: Optional[str] = None) -> str:
-    """The other backend. Used when a recommendation should not be narrated by
-    the model that issued it.
-
-    Panickssery et al. (NeurIPS 2024) found self-preference in LLM judges scales
-    with self-recognition. Same model, first-person framing and recognisable
-    authorship are all amplifiers; the last two are removed by how the
-    scorecard is rendered, and this removes the first where the other backend is
-    actually usable.
-    """
-    return "anthropic" if (backend or config.BACKEND) == "ollama" else "ollama"
-
-
-def usable(backend: str) -> bool:
-    """Cheap availability check. Never raises, never blocks for long."""
-    if backend == "anthropic":
-        import os
-
-        return bool(os.getenv("ANTHROPIC_API_KEY"))
-    if backend == "ollama":
-        try:
-            return httpx.get("%s/api/tags" % config.OLLAMA_HOST, timeout=2).status_code == 200
-        except Exception:
-            return False
-    return False
-
-
-def alternate_if_usable(backend: Optional[str] = None) -> Optional[str]:
-    """The other backend if it is reachable, otherwise None (meaning: default)."""
-    other = alternate(backend)
-    try:
-        return other if usable(other) else None
-    except Exception:
-        return None
+# There is deliberately no "narrate this with the other backend" helper. It
+# existed, and because a backend argument selects the model for a whole call, it
+# swapped the model that writes the recommendations rather than the model that
+# writes one sentence about a verdict — so a week with a verdict due generated
+# its entire brief on the local 4B model while CADYBOT_BACKEND said anthropic.
+# Panickssery et al. (NeurIPS 2024) is still the reason the scorecard renders
+# without authorship, but that effect is addressed by scorecard.py owning the
+# verdict outright, not by quietly downgrading the advisor.
 
 
 def converse(

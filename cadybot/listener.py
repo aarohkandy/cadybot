@@ -482,6 +482,20 @@ class Cadybot(discord.Client):
         for guild in list(self.guilds):
             if not self._rooms.get(guild.id):
                 continue
+            # First, and in its own try: this is the pass that closes
+            # recommendations whose horizon has run out, and it commits before
+            # it delivers. Weekly-only grading would leave a 14-day bet unjudged
+            # for up to another week. It stays quiet unless a verdict landed or
+            # a watched number actually moved.
+            try:
+                await loop.nightly(self, guild.id)
+            except Exception:
+                traceback.print_exc()
+            # Second, and never able to skip the first. Sharing one try with the
+            # grading pass meant a deleted channel or a revoked permission here
+            # stopped every recommendation in the server from ever being graded,
+            # leaving a stack trace and a comment claiming grading is never
+            # skipped.
             try:
                 pending = snapshot.unanswered_questions(guild.id, room.owner_id(guild.id) or 0)
                 if pending:
@@ -493,12 +507,6 @@ class Cadybot(discord.Client):
                                q["text"][:180], q["link"])
                         )
                     await notify.deliver(self, guild.id, "\n\n".join(lines))
-                # Separate from the alert above and never skipped because of it:
-                # this is the pass that closes recommendations whose horizon has
-                # run out. Weekly-only grading would leave a 14-day bet unjudged
-                # for up to another week. It stays quiet unless a verdict landed
-                # or a watched number actually moved.
-                await loop.nightly(self, guild.id)
             except Exception:
                 traceback.print_exc()
 
@@ -637,11 +645,16 @@ def register_commands(bot: Cadybot) -> None:
         await interaction.response.defer(ephemeral=not visible)
         try:
             snap = snapshot.build(interaction.guild_id)
-            result = await asyncio.to_thread(advisor.brief, snap, interaction.guild_id)
+            result = await asyncio.to_thread(
+                advisor.brief, snap, interaction.guild_id, register_now=False
+            )
         except (advisor.Refused, advisor.BackendError) as exc:
             await _reply(interaction, str(exc), True)
             return
         await _reply(interaction, advisor.render_brief(result), not visible)
+        # After the reply, never before it: the bet is only real once the
+        # founder has the recommendation that proposes it.
+        advisor.register(result, snap, interaction.guild_id)
 
     @tree.command(name="snapshot", description="The raw numbers, no interpretation")
     @app_commands.guild_only()

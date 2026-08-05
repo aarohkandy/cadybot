@@ -7,6 +7,14 @@ Fixed order, every time:
   3. decide whether there is anything worth saying
   4. at most one model call, to narrate what step 2 already decided
   5. deliver through notify
+  6. only then record that it was said: open the new bet, and mark the movement
+     reported
+
+Step 6 is last for the mirror-image reason to step 2. A pre-registration is a
+claim that advice was given, and "the numbers as of the last report" is a claim
+that a report happened; committing either before delivery means a deleted
+channel or a revoked permission leaves a fortnight-long bet open on advice
+nobody read, and a movement marked reported that was never mentioned.
 
 Step 2 committing before step 4 begins is the whole reason this file exists. An
 ollama call takes 20-90 seconds and sometimes does not come back; if grading
@@ -20,10 +28,11 @@ Nothing here decides a verdict. That is scorecard.py, which no model touches.
 """
 
 import asyncio
+import functools
 import json
 from typing import Any, Dict, List, Optional
 
-from . import advisor, config, db, llm, notify, scorecard, snapshot
+from . import advisor, config, db, notify, scorecard, snapshot
 
 # Per-guild setting holding the metric values as of the last report cadybot
 # actually posted — not the last time this ran. A drift of two messages a night
@@ -128,15 +137,23 @@ async def _offload(client, fn, *args):
     return await asyncio.to_thread(fn, *args)
 
 
-def _narrator(verdicts: List[Dict[str, Any]]) -> Optional[str]:
-    """Which backend writes the sentence about a verdict it did not produce.
+async def _brief(client, snap: Dict[str, Any], guild_id: int, verdicts) -> Any:
+    """Write the brief, without opening the bet it proposes.
 
-    A recommendation is narrated by the other backend where one is reachable, so
-    the model reading the scorecard is not the model that wrote the row.
+    No backend argument. Weeks with a verdict due used to hand advisor.brief the
+    *other* backend, on the theory that a recommendation should not be narrated
+    by the model that wrote it — but the argument selects the model for the whole
+    call, so with CADYBOT_BACKEND=anthropic and ollama running locally the entire
+    brief silently dropped from Opus to a local 4B model on exactly the weeks
+    there was something to answer for. The stage gates are prompt-only, and a
+    weak model walks through them. Self-preference is already handled where it
+    can be: the verdict is computed by code no model touches, the schema carries
+    no field for re-grading it, and scorecard.ref strips the authorship the
+    effect keys off.
     """
-    if not verdicts:
-        return None
-    return llm.alternate_if_usable()
+    return await _offload(
+        client, functools.partial(advisor.brief, snap, guild_id, verdicts, register_now=False)
+    )
 
 
 async def nightly(client, guild_id: int) -> Optional[str]:
@@ -156,16 +173,21 @@ async def nightly(client, guild_id: int) -> Optional[str]:
     if open_row or not moved:
         # A verdict landed, or the slot is taken. Either way there is no new
         # advice to write, so there is nothing for a model to do.
+        text = _scorecard_only(verdicts, open_row)
+        await _deliver(client, guild_id, text)
         _remember(guild_id, snap)
-        return await _deliver(client, guild_id, _scorecard_only(verdicts, open_row))
+        return text
 
-    result = await _offload(
-        client, advisor.brief, snap, guild_id, verdicts, _narrator(verdicts)
-    )
+    result = await _brief(client, snap, guild_id, verdicts)
+    text = "**Nightly**\n\n" + advisor.render_brief(result)
+    await _deliver(client, guild_id, text)
+    # Both of these are claims that the founder has been told something, so
+    # neither may run until they have been. _remember marks this movement as
+    # reported, and it never fires again; register opens a bet that will be
+    # graded in a fortnight against advice nobody read.
+    advisor.register(result, snap, guild_id)
     _remember(guild_id, snap)
-    return await _deliver(
-        client, guild_id, "**Nightly**\n\n" + advisor.render_brief(result)
-    )
+    return text
 
 
 async def weekly(client, guild_id: int) -> Optional[str]:
@@ -178,17 +200,14 @@ async def weekly(client, guild_id: int) -> Optional[str]:
         # One open bet per guild. With seven members and a fortnight, two live
         # interventions cannot be separated even in principle, so a second one
         # would only give the next grading pass something to attribute freely.
+        text = "**Weekly brief**\n\n" + _scorecard_only(verdicts, open_row)
+        await _deliver(client, guild_id, text)
         _remember(guild_id, snap)
-        return await _deliver(
-            client,
-            guild_id,
-            "**Weekly brief**\n\n" + _scorecard_only(verdicts, open_row),
-        )
+        return text
 
-    result = await _offload(
-        client, advisor.brief, snap, guild_id, verdicts, _narrator(verdicts)
-    )
+    result = await _brief(client, snap, guild_id, verdicts)
+    text = "**Weekly brief**\n\n" + advisor.render_brief(result)
+    await _deliver(client, guild_id, text)
+    advisor.register(result, snap, guild_id)
     _remember(guild_id, snap)
-    return await _deliver(
-        client, guild_id, "**Weekly brief**\n\n" + advisor.render_brief(result)
-    )
+    return text

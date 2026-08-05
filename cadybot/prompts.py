@@ -182,13 +182,11 @@ Below is the current state of the server, refreshed for this message.
 """
 
 BRIEF_INSTRUCTION = """\
-Write the founder's brief.
+Write the founder's brief, in the order the fields are given to you. The
+headline comes last on purpose: it is the conclusion, and it is worth more when
+it is written after the reasoning it summarises rather than before it.
 
-`headline` is the one-sentence state of things — the sentence they would want if
-they only read one. If the honest headline is that the server is not the problem,
-say that.
-
-Then at most three recommendations, ranked by how much they would move the
+Start with at most three recommendations, ranked by how much they would move the
 business. Fewer is better; two good ones beat three padded ones. If there is
 genuinely only one thing worth doing, return one.
 
@@ -204,6 +202,11 @@ Each recommendation needs:
 
 `dont` is one thing the founder is likely tempted to do that they should not do
 right now, with a one-line reason. Skip it only if nothing qualifies.
+
+`headline` is the one-sentence state of things — the sentence they would want if
+they only read one, and the last thing you write. If the honest headline is that
+the server is not the problem, say that. It is rendered at the top of the brief,
+so it has to hold up against the recommendations underneath it.
 
 Whether earlier advice worked is not yours to say. Verdicts on past
 recommendations are computed from the numbers by code, arrive already decided,

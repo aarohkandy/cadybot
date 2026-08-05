@@ -29,6 +29,7 @@ from . import config, db, room, stats
 assert stats.MIN_RATE_DENOMINATOR == config.MIN_RATE_DENOMINATOR
 assert stats.MIN_RECIPROCITY_POSTERS == config.MIN_RECIPROCITY_POSTERS
 assert stats.MIN_RECIPROCITY_EDGES == config.MIN_RECIPROCITY_EDGES
+assert stats.MIN_VERDICT_EVENTS == config.MIN_VERDICT_EVENTS
 
 
 def _stage(humans: int) -> str:

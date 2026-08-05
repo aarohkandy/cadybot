@@ -79,6 +79,7 @@ MIN_SHARE_DENOMINATOR = 30       # messages needed before a share-of-total is sh
 MIN_RECIPROCITY_POSTERS = 15     # distinct posters needed for a reply graph
 MIN_RECIPROCITY_EDGES = 30       # reply pairs needed for a reply graph
 MIN_COHORT = 20                  # members needed before a cohort is compared
+MIN_VERDICT_EVENTS = 20          # events in a baseline before a verdict is issued
 
 # Messages closer together than this are one conversation, not two.
 BURST_MINUTES = 5

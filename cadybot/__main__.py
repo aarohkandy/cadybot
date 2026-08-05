@@ -204,9 +204,9 @@ def main(argv=None) -> int:
             delta = None
             if current is not None and r["baseline"] is not None:
                 delta = current - r["baseline"]
+            # No "(revoked)" suffix: revocation is a verdict of its own now, and
+            # the row no longer says `worked` beside it.
             verdict = r["verdict"] or "open"
-            if r["revoked_at"]:
-                verdict += " (revoked)"
             print(
                 "%-6s %-10s %-34s %8s %8s %8s %8s  %s"
                 % (

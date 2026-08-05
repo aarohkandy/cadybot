@@ -22,6 +22,10 @@ MIN_RATE_DENOMINATOR = 20
 # anything. Under these the null sampling band on rho is about +/-0.40.
 MIN_RECIPROCITY_POSTERS = 15
 MIN_RECIPROCITY_EDGES = 30
+# Events in a baseline before a change in that count may be graded at all. The
+# same floor as MIN_RATE_DENOMINATOR and for the same reason: below it the
+# number moves for reasons that have nothing to do with the server.
+MIN_VERDICT_EVENTS = 20
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
@@ -118,6 +122,30 @@ def count_change_pvalue(x1: int, x2: int, p0: float = 0.5) -> float:
     smaller = math.fsum(p for p in pmf if p < floor)
     tied = math.fsum(p for p in pmf if floor <= p <= ceiling)
     return min(1.0, smaller + 0.5 * tied)
+
+
+def gradeable_count(baseline: int) -> bool:
+    """Whether a change from `baseline` events is large enough to be judged at all.
+
+    count_change_pvalue is anti-conservative twice over: it assumes Poisson
+    counts, and it takes half the tied mass under Lancaster's mid-p. Weekly
+    message counts on a seven-person server are nothing like Poisson — one
+    person having a talkative evening moves the count by several times its
+    nominal standard deviation — so at a baseline of four the real false-positive
+    rate is far above the nominal 5%, and "messages went 4 to 15, p=0.012" is a
+    sentence about noise. The floor sits on the baseline rather than on the
+    larger of the two counts because the baseline is fixed before the fact and
+    so cannot be chosen to clear it.
+
+    This is the same gate render_rate applies to percentages, moved to verdicts:
+    below it there is no answer, in either direction.
+
+    >>> gradeable_count(4)
+    False
+    >>> gradeable_count(20)
+    True
+    """
+    return baseline >= MIN_VERDICT_EVENTS
 
 
 def bus_factor(counts: List[int]) -> int:

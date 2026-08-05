@@ -109,19 +109,47 @@ class Recommendation(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def _bet_must_be_won_by_improving(self) -> "Recommendation":
+        """Refuse a metric and direction whose success is the server getting worse.
+
+        scorecard.POLARITY is which way each metric is better, and until now only
+        the guardrail consulted it. Nothing stopped a recommendation naming
+        members.gone_quiet.count with direction "up": it reads like a confident,
+        measurable, pre-registered bet, and the scorer graded it `worked` when
+        eighteen more members went silent. Rejected here, at the point the schema
+        is validated, so the bet cannot be stored at all — scorecard.py refuses
+        it again at grading time, for rows written before this existed.
+        """
+        polarity = scorecard.POLARITY.get(self.metric)
+        if polarity is None or self.direction == "unchanged":
+            return self
+        if (self.direction == "up") != (polarity > 0):
+            raise ValueError(
+                "%s going %s is the direction that makes the server worse, so it "
+                "cannot be what this recommendation is for. Name the metric that "
+                "should improve, or use 'none'." % (self.metric, self.direction)
+            )
+        return self
+
 
 class Brief(BaseModel):
-    headline: str
-    # Zero is allowed. playbooks/seed.md calls doing nothing to the server "a
-    # legitimate and frequently correct recommendation", and a schema with a
-    # floor of one manufactures something to do on every run.
+    # Field order is generation order, so the headline is last: it is the
+    # conclusion, and a conclusion written before the recommendations exist is
+    # written before there is any reasoning to support it. render_brief puts it
+    # back on top for the reader.
+    #
+    # Zero recommendations is allowed. playbooks/seed.md calls doing nothing to
+    # the server "a legitimate and frequently correct recommendation", and a
+    # schema with a floor of one manufactures something to do on every run.
     recommendations: List[Recommendation] = Field(default_factory=list, max_length=3)
-    dont: Optional[str] = None
     no_action_reason: Optional[str] = Field(
         default=None,
         description="Required when there are no recommendations. Must cite a "
         "number from the snapshot.",
     )
+    dont: Optional[str] = None
+    headline: str
 
     # Set after generation, never by the model, and excluded from the schema.
     _unverified: List[str] = PrivateAttr(default_factory=list)
@@ -181,8 +209,16 @@ result — you cannot choose it and you cannot revise it.
 - `metric` and `guardrail_metric` must be exact dotted paths from the list in
   the schema. If nothing in the snapshot would move, use "none": that is graded
   as unmeasurable, which is not a failure. Do not reach for a nearby metric.
-- `direction` is what the metric should do. `horizon_days` is how long before
-  that is a fair question.
+- `direction` is what the metric should do, and it has to be the direction that
+  makes the server *better*. A recommendation whose success would mean more
+  members going quiet, or more people leaving, is rejected outright: name the
+  metric that should improve instead. "unchanged" is a claim that the metric
+  holds, and is graded as one.
+- `horizon_days` is how long before that is a fair question. A metric with a
+  window in its name cannot be judged inside that window — two readings of a
+  30-day count taken a week apart are mostly the same messages — so a horizon
+  shorter than the metric's own window is raised to it before anything is
+  stored.
 - `guardrail_metric` is what must not get worse meanwhile. "none" is allowed.
 
 Return zero recommendations when nothing is worth doing. If you do,
@@ -379,12 +415,17 @@ def brief(
     guild_id: Optional[int] = None,
     verdicts: Optional[List[Dict[str, Any]]] = None,
     backend: Optional[str] = None,
+    register_now: bool = True,
 ) -> Brief:
     """One brief. Grading has already happened by the time this runs.
 
     `verdicts` comes from scorecard.score, which loop.py commits before calling
     here. When it is None — the slash-command path — already-closed verdicts are
     read back instead, so the report is the same shape either way.
+
+    `register_now=False` returns the brief without opening the tracked bet, for
+    callers that can tell whether the founder actually received it. See
+    `register` below.
     """
     guild_id = guild_id or config.GUILD_ID
     open_row = scorecard.open_row(guild_id) if guild_id else None
@@ -410,6 +451,12 @@ def brief(
     result._backend = backend
     result._verdicts = verdicts
     result._open = open_row
+    # scorecard.pre_register raises a horizon shorter than the metric's own
+    # window, because two readings closer together than that are the same events
+    # counted twice. Mirrored here so the "_Watch:_" line the founder reads is
+    # the promise that will actually be stored.
+    for rec in result.recommendations:
+        rec.horizon_days = max(rec.horizon_days, scorecard.window_days(rec.metric))
     # no_action_reason is checked too: it is required to cite a number, and a
     # required number is exactly the kind that gets invented to satisfy a rule.
     cited = [rec.evidence for rec in result.recommendations]
@@ -419,21 +466,44 @@ def brief(
         set(token for text in cited for token in verify_evidence(snap, text))
     )
 
+    if register_now:
+        register(result, snap, guild_id)
+    return result
+
+
+def register(result: Brief, snap: Dict[str, Any], guild_id: Optional[int] = None) -> List[int]:
+    """Open the tracked bet. Called once the founder has the brief in hand.
+
+    Split out of `brief` because pre-registration is a claim that advice was
+    given. Run before delivery, a channel that has been deleted or a permission
+    that has been revoked leaves a fortnight-long bet open on a recommendation
+    nobody read, which then grades against a founder who was never told what to
+    do.
+    """
+    guild_id = guild_id or config.GUILD_ID
+    if not guild_id:
+        return []
+
     # Only the top-ranked recommendation becomes a tracked bet. The founder may
     # usefully hear three things; three simultaneous pre-registrations over a
     # fortnight and seven members cannot be told apart, and a grader handed
     # three overlapping claims on one delta will find a way to credit all of
     # them. The rest are advice, and are rendered as advice.
-    if guild_id and result.recommendations and open_row is None:
-        scorecard.pre_register(
+    ids: List[int] = []
+    if result.recommendations and result._open is None:
+        ids = scorecard.pre_register(
             guild_id,
             snap,
             [result.recommendations[0].model_dump()],
-            llm.describe(backend),
+            llm.describe(result._backend),
         )
-    if guild_id and verdicts:
-        scorecard.record_narration([v["ref"] for v in verdicts], llm.describe(backend))
-    return result
+    # Only rows this pass closed. Everything that renders a brief reads closed
+    # verdicts back for context, and narrating those again relabels a row months
+    # after the sentence it names was written.
+    narrated = [v["ref"] for v in result._verdicts if v.get("newly_closed")]
+    if narrated:
+        scorecard.record_narration(narrated, llm.describe(result._backend))
+    return ids
 
 
 def chat(
@@ -473,6 +543,7 @@ _VERDICT_LABEL = {
     "worked": "moved as predicted",
     "failed": "did not move",
     "harmful": "guardrail broke",
+    "revoked": "moved, then fell back",
     "inconclusive": "no separable change",
     "not_attempted": "no sign it was done",
     "unmeasurable": "not measurable",
@@ -523,7 +594,10 @@ def render_scorecard(verdicts: List[Dict[str, Any]]) -> List[str]:
             "verdict: **%s** (%s)"
             % (v["verdict"], _VERDICT_LABEL.get(v["verdict"], v["verdict"]))
         )
-        if v.get("revoked_at"):
+        if v.get("revoked_at") and not v.get("note"):
+            # Only when nothing else says it. The pass that revokes a row hands
+            # over a note carrying the day it was re-checked, which is strictly
+            # more than this line; rows read back later have no note at all.
             lines.append("_revoked on re-check: the metric did not hold._")
         if v.get("note"):
             lines.append("_%s_" % v["note"])

@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS invite_uses (
     PRIMARY KEY (guild_id, code)
 );
 
+-- Written only by scorecard.pre_register, which owns the extra columns it adds
+-- to this table. There is deliberately no insert helper here: a row stored
+-- without its baseline, its threshold and its guardrail floor can never be
+-- graded, and a second writer is a way to open one that never will be.
 CREATE TABLE IF NOT EXISTS recommendations (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id      INTEGER NOT NULL,
@@ -666,24 +670,6 @@ def attribute_invite(guild_id: int, user_id: int, code: Optional[str]) -> None:
         "UPDATE members SET invite_code=? WHERE guild_id=? AND user_id=?",
         (code, guild_id, user_id),
     )
-
-
-def save_recommendations(guild_id: int, recs: List[Dict[str, Any]]) -> None:
-    stamp = now()
-    for r in recs:
-        connect().execute(
-            "INSERT INTO recommendations (guild_id, created_at, headline, action, evidence, metric, prediction) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                guild_id,
-                stamp,
-                r.get("headline", ""),
-                r.get("action", ""),
-                r.get("evidence", ""),
-                r.get("metric", ""),
-                r.get("prediction", ""),
-            ),
-        )
 
 
 def record_run(guild_id: int, kind: str, usage: Any, model: str) -> None:
