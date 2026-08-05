@@ -1,181 +1,178 @@
 # cadybot
 
-A read-only growth advisor for a Discord server.
+A read-only Discord growth advisor.
 
 A caddy knows the course, carries your clubs, and tells you which club to use —
 but never takes the swing. cadybot reads your server, keeps a durable record of
-it, and tells you what to do. It posts in exactly one place: a private channel
-you create with `/private`.
+it, tells you what to do, and later tells you honestly whether that worked.
+
+It posts in exactly one place: a private channel you create with `/private`.
+
+## The two rules everything else follows from
+
+**1. The model never produces a number.** `snapshot.py` computes every metric in
+SQL; the model only interprets what it is handed. That is what stops it
+inventing a member count or a retention rate.
+
+**2. The model never grades itself.** `scorecard.py` decides whether past advice
+worked, using thresholds fixed *before* the outcome was known, and it cannot
+import `advisor` or `llm`. Verdicts reach the prompt as facts the model did not
+produce and cannot revise.
+
+The second rule exists because the first one is not enough. A system that cannot
+hallucinate a statistic can still hallucinate that it has been helping.
 
 ## What it does
 
-- **Listens.** Logs messages, joins, leaves, and voice-channel *presence counts*
-  to SQLite. Joins and leaves cannot be backfilled from Discord — they exist only
-  as live gateway events — so the listener is the only thing that matters on day one.
-- **Catches.** Flags unanswered questions from members and members who have gone
-  quiet. At seven members, one ignored message is a churned user.
-- **Advises.** `/ask` gives a straight yes / no / not-yet on a specific idea,
-  grounded in the actual numbers. `/brief` gives at most three ranked things to
-  do, each with evidence and a metric to watch.
-- **Remembers.** Every recommendation is stored so it can later tell you whether
-  its own advice worked.
+- **Listens.** Messages, edits, deletes, joins, leaves, threads, mentions,
+  reactions, voice presence counts, invite attribution, moderation actions from
+  the audit log, and server settings. Joins and leaves exist only as live
+  gateway events — Discord will not let you backfill them — so the listener is
+  the one part worth running before anything else is built.
+- **Measures.** Stage, activation, response rate, lurker conversion, retention
+  brackets, contributor concentration, reply reciprocity, dead channels,
+  moderation load. Every rate is gated by sample size.
+- **Advises.** `/brief` gives at most three ranked things to do — or zero, with
+  a reason citing a number. `/ask` gives a straight yes / no / not-yet.
+- **Grades itself.** Each recommendation pre-registers a metric, a direction, a
+  horizon and a guardrail *before* you act. Later, the scorer says whether it
+  worked, failed, was never attempted, or cannot be told apart from noise.
 
-It never moderates, never DMs members, and never posts in any channel except its
-own. That last part is enforced in code: every outgoing message passes a guard
-that rejects any destination other than that server's private channel — see
-`notify.WriteBlocked`.
+It never moderates, never DMs members, and never posts outside its own channel.
+That last part is enforced in `notify._guard`, which rejects every destination
+except the private channel — not by convention.
 
-## Several servers at once
+## What it refuses to tell you
 
-Add cadybot to as many servers as you like. Each one is completely independent:
-its own private channel, its own owner, its own numbers, its own
-recommendations. Every row in the database is keyed by `guild_id` and no query
-crosses servers, so a test server and a live server can never see each other.
+This is a feature, and the thing most tools in this space get wrong.
 
-Run `/private` separately in each. Whoever runs it becomes that server's owner —
-the person whose posting cadence is tracked, and whose messages aren't counted
-as unanswered questions.
+- **Unknown is not zero.** Every server setting cadybot cannot read comes back as
+  `{value: null, reason: ...}`. "Onboarding is off" and "I lack the permission to
+  see whether onboarding is off" are different sentences.
+- **Small samples get no percentage.** A rate over seven people looks exactly as
+  precise as a rate over seven thousand. Below the floors in `stats.py`, cadybot
+  prints the counts and withholds the ratio.
+- **No verdict from noise.** Below 20 baseline events, the scorer returns
+  `inconclusive` rather than a confident call. On a seven-member server this
+  makes `worked` and `harmful` equally unreachable — deliberately symmetric.
+- **`not_measurable`** names what no bot can see at any permission level, so the
+  gap is visible rather than quietly filled in. Discord's own visitor and
+  retention numbers are dashboard-only; the `VIEW_GUILD_INSIGHTS` permission bit
+  exists but no REST route consumes it.
 
 ## Talking to it
 
-Inside the private channel, just type. Any ordinary message is a question, and
-cadybot answers with the same stage gates and evidence discipline as `/brief` —
-it will still tell you no. It remembers the last several turns, so follow-ups
-work, and that history survives a restart.
+Inside the private channel, just type. Any ordinary message is a question, with
+the same stage gates and evidence discipline as `/brief` — it will still tell
+you no. It remembers the last several turns, and that survives a restart.
 
-Start a line with `//` to say something it should ignore, so the channel stays
-usable for notes and side chat. `/reset` clears the thread when you change
-subject.
-
-Commands are still there for the crisp version: `/ask` forces a yes/no/not-yet
-verdict, `/brief` produces the ranked list.
+Start a line with `//` to say something it should ignore. `/reset` clears the
+thread when you change subject.
 
 ## Commands
 
-Run these in Discord. `/private`, `/add`, `/remove` and `/backfill` need
-**Manage Server**; the rest need to be able to see the private channel.
+`/private`, `/add`, `/remove` and `/backfill` need **Manage Server**; the rest
+need to be able to see the private channel.
 
 ```
 /private            create (or repair) your private channel here
 /ask <question>     a straight yes / no / not-yet
-/brief              what to do this week, ranked
+/brief              what to do this week, ranked — possibly nothing
 /snapshot           the raw numbers, no interpretation
-/who                who can see the private channel
-/add @someone       let someone in
-/remove @someone    take them back out
+/who                who can see the private channel, including anyone
+                    bypassing it via Administrator
+/add /remove        change that
 /backfill           import this server's message history
+/reset              forget the conversation so far
 ```
 
-Answers are visible in the private channel and ephemeral (only you see them)
-anywhere else, so cadybot never puts analytics in front of your members.
+Answers are visible in the private channel and ephemeral anywhere else, so
+cadybot never puts analytics in front of your members.
+
+**`/who` tells the truth about privacy.** Administrators bypass channel
+overwrites entirely, so a server admin — or an admin *bot* — can read the
+private channel and `/remove` cannot stop them. Only removing Administrator
+from their role can.
+
+## Several servers at once
+
+Each server is independent: its own private channel, owner, numbers and
+recommendations. Every row is keyed by `guild_id` and no query crosses servers,
+so a test server and a live server can never see each other. Run `/private`
+separately in each; whoever runs it becomes that server's owner.
 
 ## Setup
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-cp .env.example .env
+cp .env.example .env          # add DISCORD_TOKEN
+python -m cadybot invite      # prints your OAuth URLs
+python -m cadybot listen
 ```
 
-Create an application at <https://discord.com/developers/applications>, add a
-bot, and put the token in `.env`. Under **Bot → Privileged Gateway Intents**
-enable **Server Members Intent** and **Message Content Intent** — nothing works
-without both. Under 10,000 reachable users these are plain toggles, no
-application to file.
+Enable **Server Members Intent** and **Message Content Intent** under
+Developer Portal → Bot → Privileged Gateway Intents. Nothing works without both.
+Under 10,000 reachable users they are plain toggles.
 
-```bash
-python -m cadybot invite     # prints your OAuth URLs
-python -m cadybot listen     # keep this running
-```
+The invite URL includes `applications.commands`; without it the slash commands
+never appear.
 
-The invite URL includes the `applications.commands` scope; without it the slash
-commands never appear. The scoped permission set is View Channels, Send
-Messages, Read Message History, Manage Channels, Manage Roles, Manage Server.
-The two Manage permissions let cadybot create the private channel and control
-who sees it; Manage Server lets it read invite use-counts to attribute joins.
-
-Slash commands are synced per-server the moment cadybot joins, so they appear
-immediately.
-
-## Hosting it on a Mac
-
-```bash
-deploy/install.sh              # start now, and at every login
-deploy/install.sh --awake      # ...and stop the Mac idle-sleeping while it runs
-deploy/install.sh status
-deploy/install.sh restart      # after changing code or .env
-deploy/install.sh stop
-deploy/install.sh uninstall
-```
-
-This installs a launchd agent that starts cadybot at login and restarts it if it
-dies. Logs go to `logs/cadybot.log` and `logs/cadybot.err`.
-
-**Don't keep the project in `~/Downloads`, `~/Desktop`, or `~/Documents.`**
-macOS blocks background agents from reading those directories, and the failure
-is an opaque `PermissionError: Operation not permitted` on `.venv/pyvenv.cfg`
-rather than anything that mentions permissions. `~/cadybot` is fine.
-
-**While the Mac sleeps, cadybot is offline**, and gateway events during that
-window are gone for good. Messages can be recovered later with `/backfill`;
-joins and leaves cannot — Discord has no API for them. `--awake` wraps the agent
-in `caffeinate -i` so the machine won't idle-sleep while it's running, at a real
-cost in battery. Closing the lid still sleeps regardless.
-
-Local inference also needs Ollama running. The Ollama app installs itself as a
-background service, so it comes back on its own after a reboot; `python -m
-cadybot doctor` tells you if it hasn't.
-
-## Command line
-
-```bash
-python -m cadybot doctor                  # is the model backend reachable?
-python -m cadybot servers                 # which servers cadybot knows
-python -m cadybot snapshot --guild <id>   # raw numbers, no model involved
-python -m cadybot ask --guild <id> "would a weekly event help?"
-python -m cadybot brief --guild <id>
-python -m cadybot outcomes --guild <id>   # did past advice work?
-```
-
-`--guild` can be omitted if `GUILD_ID` is set in `.env`, or if cadybot only
-knows about one server. With several known and no default it refuses to guess.
+**Hosting:** `deploy/install.sh` for a Mac (launchd), `deploy/linux/` for a VM
+(systemd). See `deploy/linux/README.md` — the short version is that the bot
+belongs on the smallest VM you can rent and the model does not belong on a VM at
+all.
 
 ## Model backend
 
-`CADYBOT_BACKEND=ollama` (default) runs inference locally and free.
-`CADYBOT_BACKEND=anthropic` uses Claude Opus 5.
+`CADYBOT_BACKEND=anthropic` uses Claude Opus 5. `CADYBOT_BACKEND=ollama` runs
+locally and free.
 
-The local path is for exercising the plumbing. A 9GB local model will follow the
-stage gates and cite the snapshot, but its judgment is visibly thinner than the
-API's, and judgment is the entire product. Treat local output as proof the
-wiring works, not as advice worth acting on.
+Local inference is for offline development, not for saving money. The stage
+gates and playbooks are prompt-level, so a weaker model follows them less
+reliably — and judgment is the entire product. At this volume the API costs a
+few dollars a month.
 
-`CADYBOT_OLLAMA_NUM_CTX` matters more than the model choice. Ollama's default
-context is small enough to silently truncate the system prompt, and a truncated
-stage gate is worse than none — the model would happily recommend a tournament
-to seven people. cadybot refuses to trust a response whose prompt nearly filled
-the window.
+`CADYBOT_OLLAMA_KEEP_ALIVE=0` unloads the model between questions instead of
+holding several gigabytes; `30m` keeps it warm at the cost of that memory.
+`CADYBOT_OLLAMA_NUM_CTX` must be large enough for the whole prompt — a truncated
+stage gate is worse than none, so cadybot refuses a response whose prompt nearly
+filled the window rather than trusting it.
+
+## Tests
+
+```bash
+.venv/bin/python tests/harness.py            # 19 synthetic servers, no model
+.venv/bin/python tests/scorer.py             # 31 grading cases, no model
+.venv/bin/python tests/harness.py --advice    # runs the model, slow
+.venv/bin/python tests/conversation.py        # multi-turn dialogue, runs the model
+```
+
+The first two are deterministic and fast — run them after any change. They cover
+brand-new servers, raids, exoduses, all-bot servers, one power user carrying
+everything, 5,000 members, dead channels, moderation waves, and the difference
+between a fact that is false and a fact cadybot cannot read.
+
+The scorer suite is the one that matters most. It pins the cases where an
+earlier version marked its own advice `worked` while twenty people went silent.
 
 ## Data
 
-Everything lands in `cadybot.db` (gitignored). Message text is kept in full for
-now — seven people cannot generate enough to matter. Revisit a rolling window at
-~1,000 members. `python -m cadybot purge --guild <id> --member <id>` deletes one
-member's data on request.
+Everything lands in `cadybot.db` (gitignored). `python -m cadybot purge --guild
+<id> --member <id>` deletes one member's data on request.
 
-Messages in a private channel are never stored, so cadybot's own output can
-never inflate its own numbers. Bot messages are excluded from activity counts
-for the same reason: a chatty bot is not a lively server.
+Messages in a private channel are never stored, and bot messages are excluded
+from activity counts, so cadybot cannot inflate its own numbers.
 
 ## Compliance notes
 
-- Discord's Developer Policy prohibits using message content obtained via the
-  API to **train** ML/AI models. This sends message text to a model for
-  **inference** only — no fine-tuning, ever. Local inference sends it nowhere at
-  all; Anthropic does not train on API inputs.
-- Discord's Developer Terms allow retaining chat logs only as necessary for
-  operation, and require deleting end-user data on request. Hence `purge`.
+- Discord's Developer Policy prohibits using API message content to **train**
+  ML/AI models. cadybot only ever runs **inference** — no fine-tuning, ever.
+  Local inference sends message content nowhere; Anthropic does not train on API
+  inputs.
+- Developer Terms allow retaining chat logs only as necessary for operation, and
+  require deleting end-user data on request. Hence `purge`.
 - Message content is never written to logs — only IDs and counts.
-- Add one line to `#rules` telling members the server is analyzed by a private
+- Put one line in `#rules` telling members the server is analyzed by a private
   bot. Output invisibility is fine; existence invisibility is not.
 
 Read §21 of the Developer Policy yourself before making this public.

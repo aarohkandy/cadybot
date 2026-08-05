@@ -36,6 +36,32 @@ def _flatten(system_blocks: List[Dict[str, Any]]) -> str:
     return "\n\n".join(b["text"] for b in system_blocks)
 
 
+def _ollama_error(response) -> None:
+    """Turn an Ollama HTTP failure into a BackendError callers already catch.
+
+    httpx's raise_for_status raises HTTPStatusError, which is not a
+    BackendError, so it escaped every `except BackendError` in the codebase and
+    reached the user as the generic "that failed" message. A 500 here usually
+    means the model runner died mid-request — worth saying, because the fix is
+    different from every other failure in this module.
+    """
+    if response.status_code == 404:
+        raise BackendError(
+            "Ollama has no model %r. Run `ollama pull %s`."
+            % (config.OLLAMA_MODEL, config.OLLAMA_MODEL)
+        )
+    if response.status_code >= 500:
+        raise BackendError(
+            "Ollama returned %d. The model runner usually died mid-request — "
+            "check `ollama ps`, then ask again." % response.status_code
+        )
+    if response.status_code >= 400:
+        raise BackendError(
+            "Ollama rejected the request (%d): %s"
+            % (response.status_code, response.text[:300])
+        )
+
+
 # --- ollama ----------------------------------------------------------------
 
 
@@ -78,12 +104,7 @@ def _ollama(system_blocks, user_text: str, schema: Type[T], kind: str, guild_id)
             "CADYBOT_OLLAMA_TIMEOUT." % config.OLLAMA_TIMEOUT
         ) from exc
 
-    if response.status_code == 404:
-        raise BackendError(
-            "Ollama has no model %r. Run `ollama pull %s`."
-            % (config.OLLAMA_MODEL, config.OLLAMA_MODEL)
-        )
-    response.raise_for_status()
+    _ollama_error(response)
     body = response.json()
 
     prompt_tokens = body.get("prompt_eval_count") or 0
@@ -213,7 +234,7 @@ def converse(
             ) from exc
         except httpx.ReadTimeout as exc:
             raise BackendError("Ollama timed out after %ds." % config.OLLAMA_TIMEOUT) from exc
-        response.raise_for_status()
+        _ollama_error(response)
         body = response.json()
         if guild_id:
             db.record_local_run(
