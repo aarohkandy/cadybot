@@ -6,13 +6,14 @@ then — if it only knows about one server — that one.
 """
 
 import argparse
+import asyncio
 import json
 import sys
 from typing import Optional
 
 import discord
 
-from . import advisor, backfill, config, db, listener, llm, room, snapshot
+from . import advisor, backfill, config, db, listener, llm, loop, room, scorecard, snapshot
 
 
 def _known_guilds():
@@ -114,6 +115,8 @@ def main(argv=None) -> int:
     with_guild("snapshot", "print the raw numbers, no LLM")
     with_guild("brief", "ranked recommendations")
     with_guild("outcomes", "past recommendations and their outcomes")
+    with_guild("score", "grade recommendations past their horizon, no LLM")
+    with_guild("loop", "run one nightly pass without delivering it")
 
     ask = with_guild("ask", "a straight yes / no / not-yet")
     ask.add_argument("question", nargs="+")
@@ -185,18 +188,73 @@ def main(argv=None) -> int:
         return 0
 
     if args.command == "outcomes":
-        rows = db.query(
-            "SELECT created_at, headline, metric, prediction, outcome FROM recommendations "
-            "WHERE guild_id=? ORDER BY created_at DESC LIMIT 30",
-            (guild_id,),
-        )
+        rows = scorecard.rows_for_cli(guild_id)
         if not rows:
             print("No recommendations recorded yet for this server. Run `brief` first.")
             return 0
+        # One snapshot, so an open row can show where its metric stands today
+        # without waiting for its horizon. No model is involved either way.
+        snap = snapshot.build(guild_id)
+        print("%-6s %-10s %-34s %8s %8s %8s %8s  %s"
+              % ("ref", "issued", "metric", "baseline", "current", "delta", "p", "verdict"))
         for r in rows:
-            print("%s  %s" % (r["created_at"][:10], r["headline"]))
-            print("    watch: %s -> %s" % (r["metric"], r["prediction"]))
-            print("    outcome: %s" % (r["outcome"] or "not yet reviewed"))
+            current = r["current"]
+            if current is None and r["metric"] and r["metric"] != "none":
+                current = snapshot.resolve_metric(snap, r["metric"])
+            delta = None
+            if current is not None and r["baseline"] is not None:
+                delta = current - r["baseline"]
+            verdict = r["verdict"] or "open"
+            if r["revoked_at"]:
+                verdict += " (revoked)"
+            print(
+                "%-6s %-10s %-34s %8s %8s %8s %8s  %s"
+                % (
+                    r["ref"],
+                    (r["created_at"] or "")[:10],
+                    (r["metric"] or "none")[:34],
+                    advisor.fmt_number(r["baseline"]),
+                    advisor.fmt_number(current),
+                    advisor.fmt_number(delta),
+                    "%.3f" % r["p_value"] if r["p_value"] is not None else "n/a",
+                    verdict,
+                )
+            )
+            print("       %s" % r["action_text"][:100])
+            if r["enactment_evidence"]:
+                print("       enacted: %s" % r["enactment_evidence"])
+        return 0
+
+    if args.command == "score":
+        # Deterministic. This is the one command that changes what cadybot
+        # believes about its own advice, and it never asks a model anything.
+        closed = scorecard.score(guild_id)
+        if not closed:
+            print("Nothing was due for scoring.")
+            return 0
+        for r in closed:
+            print(
+                "%s  %-14s %s: baseline %s -> %s%s"
+                % (
+                    r["ref"],
+                    r["verdict"],
+                    r["metric"],
+                    advisor.fmt_number(r["baseline"]),
+                    advisor.fmt_number(r["current"]),
+                    ", p=%.3f" % r["p_value"] if r["p_value"] is not None else "",
+                )
+            )
+            if r.get("note"):
+                print("    %s" % r["note"])
+        return 0
+
+    if args.command == "loop":
+        try:
+            text = asyncio.run(loop.nightly(None, guild_id))
+        except (advisor.Refused, advisor.BackendError) as exc:
+            print(exc)
+            return 1
+        print(text if text else "Nothing due and nothing moved — stayed quiet.")
         return 0
 
     if args.command == "purge":

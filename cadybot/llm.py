@@ -148,28 +148,78 @@ def _claude(system_blocks, user_text: str, schema: Type[T], kind: str, guild_id)
 # --- dispatch --------------------------------------------------------------
 
 
+BACKENDS = ("ollama", "anthropic")
+
+
 def generate(
-    system_blocks, user_text: str, schema: Type[T], kind: str, guild_id: Optional[int] = None
+    system_blocks,
+    user_text: str,
+    schema: Type[T],
+    kind: str,
+    guild_id: Optional[int] = None,
+    backend: Optional[str] = None,
 ) -> T:
-    if config.BACKEND == "ollama":
+    chosen = backend or config.BACKEND
+    if chosen == "ollama":
         return _ollama(system_blocks, user_text, schema, kind, guild_id)
-    if config.BACKEND == "anthropic":
+    if chosen == "anthropic":
         return _claude(system_blocks, user_text, schema, kind, guild_id)
-    raise BackendError("Unknown CADYBOT_BACKEND %r (use 'ollama' or 'anthropic')." % config.BACKEND)
+    raise BackendError("Unknown CADYBOT_BACKEND %r (use 'ollama' or 'anthropic')." % chosen)
 
 
-def describe() -> str:
-    if config.BACKEND == "ollama":
+def describe(backend: Optional[str] = None) -> str:
+    if (backend or config.BACKEND) == "ollama":
         return "%s (local)" % config.OLLAMA_MODEL
     return config.MODEL
 
 
-def converse(system_blocks, messages: List[Dict[str, str]], guild_id=None) -> str:
+def alternate(backend: Optional[str] = None) -> str:
+    """The other backend. Used when a recommendation should not be narrated by
+    the model that issued it.
+
+    Panickssery et al. (NeurIPS 2024) found self-preference in LLM judges scales
+    with self-recognition. Same model, first-person framing and recognisable
+    authorship are all amplifiers; the last two are removed by how the
+    scorecard is rendered, and this removes the first where the other backend is
+    actually usable.
+    """
+    return "anthropic" if (backend or config.BACKEND) == "ollama" else "ollama"
+
+
+def usable(backend: str) -> bool:
+    """Cheap availability check. Never raises, never blocks for long."""
+    if backend == "anthropic":
+        import os
+
+        return bool(os.getenv("ANTHROPIC_API_KEY"))
+    if backend == "ollama":
+        try:
+            return httpx.get("%s/api/tags" % config.OLLAMA_HOST, timeout=2).status_code == 200
+        except Exception:
+            return False
+    return False
+
+
+def alternate_if_usable(backend: Optional[str] = None) -> Optional[str]:
+    """The other backend if it is reachable, otherwise None (meaning: default)."""
+    other = alternate(backend)
+    try:
+        return other if usable(other) else None
+    except Exception:
+        return None
+
+
+def converse(
+    system_blocks,
+    messages: List[Dict[str, str]],
+    guild_id=None,
+    backend: Optional[str] = None,
+) -> str:
     """Free-text reply for ordinary conversation. No schema — this is talking.
 
     `messages` is the running exchange, oldest first, each {role, content}.
     """
-    if config.BACKEND == "ollama":
+    if (backend or config.BACKEND) == "ollama":
         payload = {
             "model": config.OLLAMA_MODEL,
             "stream": False,
