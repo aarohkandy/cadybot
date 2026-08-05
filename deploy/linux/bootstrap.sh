@@ -19,6 +19,23 @@ USER=cadybot
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root (sudo)"; exit 1; }
 
+echo "== swap"
+# The bot idles at ~15 MB, so a 1 GB instance runs it comfortably — but pip
+# resolving and building wheels for pydantic and friends peaks far higher and
+# gets OOM-killed, which looks like a mysterious hang rather than an error.
+# Swap costs a few pennies of disk and makes the cheapest VM viable.
+MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+if [ "${MEM_MB:-0}" -lt 2048 ] && [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile >/dev/null
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "   added 2G swap (RAM is ${MEM_MB}MB)"
+else
+  echo "   not needed (RAM ${MEM_MB}MB)"
+fi
+
 echo "== packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
