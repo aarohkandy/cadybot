@@ -1,0 +1,49 @@
+[Unit]
+Description=cadybot Discord growth advisor
+Documentation=https://github.com/aarohkandy/cadybot
+# Wants= rather than Requires=: a DNS blip at boot must not leave the unit dead,
+# because the events cadybot cannot recover later are exactly the ones that
+# happen while it is not listening.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=cadybot
+Group=cadybot
+WorkingDirectory=/opt/cadybot
+
+# Secrets live here, not in the unit file, so `systemctl cat` is safe to paste
+# into a support thread.
+EnvironmentFile=/etc/cadybot/env
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/cadybot/.venv/bin/python -m cadybot listen
+
+Restart=always
+RestartSec=10
+# Discord rate-limits reconnects. Give up rather than hammer the gateway if
+# something is genuinely broken, so a crash loop cannot get the token banned.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# The database is the only thing worth protecting; everything else is a clone.
+StateDirectory=cadybot
+ReadWritePaths=/opt/cadybot
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cadybot
+
+[Install]
+WantedBy=multi-user.target
