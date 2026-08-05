@@ -61,6 +61,34 @@ QUIET_DAYS = 14
 # A member question with no reply after this many hours is flagged as unanswered.
 UNANSWERED_HOURS = 3
 
+# How long after a question a later message may still count as its answer. Wider
+# than UNANSWERED_HOURS on purpose: the alert should fire while the founder can
+# still fix it, but a reply the next morning did answer the question.
+RESPONSE_WINDOW_HOURS = 48
+assert RESPONSE_WINDOW_HOURS >= UNANSWERED_HOURS, (
+    "RESPONSE_WINDOW_HOURS must not be shorter than UNANSWERED_HOURS, or a "
+    "question could be alerted on and then never creditable as answered."
+)
+
+# Floors below which a derived statistic is not reported at all. A 7-member
+# server produces ratios that look precise and mean nothing; refusing to print
+# them is the only honest option, and it is cheaper to agree on the floors here
+# than to relitigate them at every call site.
+MIN_RATE_DENOMINATOR = 20        # events needed before a percentage is shown
+MIN_SHARE_DENOMINATOR = 30       # messages needed before a share-of-total is shown
+MIN_RECIPROCITY_POSTERS = 15     # distinct posters needed for a reply graph
+MIN_RECIPROCITY_EDGES = 30       # reply pairs needed for a reply graph
+MIN_COHORT = 20                  # members needed before a cohort is compared
+
+# Messages closer together than this are one conversation, not two.
+BURST_MINUTES = 5
+# How often the online/member estimate is sampled from Discord.
+PRESENCE_SAMPLE_HOURS = 1
+# How far ahead a recommendation is allowed to promise anything.
+RECOMMENDATION_HORIZON_DAYS = 14
+# Lifetime messages after which a member counts as having found their voice.
+SPEAK_THRESHOLD_MESSAGES = 10
+
 
 def require_discord() -> None:
     if not DISCORD_TOKEN:

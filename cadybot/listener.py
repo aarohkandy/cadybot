@@ -32,8 +32,26 @@ INTENTS.guild_messages = True
 INTENTS.dm_messages = True
 INTENTS.guild_reactions = True
 INTENTS.voice_states = True
+# GUILD_MODERATION. Not privileged and needs no approval, but a running client
+# keeps whatever intents it connected with, so this takes effect on the next
+# deliberate restart rather than immediately.
+INTENTS.moderation = True
 
 NO_ROOM = "No private channel in this server yet. Run `/private` first."
+
+# The only audit-log actions worth keeping. A kick, a ban and a prune are the
+# only departures Discord will ever explain; the rest of the audit log is server
+# administration and says nothing about whether the community is working.
+AUDIT_ACTIONS = (
+    discord.AuditLogAction.kick,
+    discord.AuditLogAction.member_prune,
+    discord.AuditLogAction.ban,
+    discord.AuditLogAction.unban,
+    discord.AuditLogAction.automod_block_message,
+)
+# Catch-up is bounded per action per start. A busy server's audit log has no end,
+# and a start that never finishes is worse than a gap.
+AUDIT_CATCHUP_LIMIT = 200
 
 
 class Cadybot(discord.Client):
@@ -81,6 +99,8 @@ class Cadybot(discord.Client):
             self.weekly_brief.start()
         if not self.daily_alerts.is_running():
             self.daily_alerts.start()
+        if not self.hourly_facts.is_running():
+            self.hourly_facts.start()
 
     async def _adopt(self, guild: discord.Guild) -> None:
         """Register a server and sync its slash commands. Safe to repeat."""
@@ -88,16 +108,17 @@ class Cadybot(discord.Client):
         for member in guild.members:
             db.upsert_member(
                 guild.id, member.id, member.name, member.display_name,
-                member.bot, db.iso(member.joined_at),
+                member.bot, db.iso(member.joined_at), db.member_state(member),
             )
         for channel in guild.channels:
-            db.upsert_channel(
-                guild.id, channel.id, getattr(channel, "name", None),
-                type(channel).__name__,
-                getattr(getattr(channel, "category", None), "id", None),
-                db.iso(getattr(channel, "created_at", None)),
-            )
+            backfill.register_channel(guild.id, channel)
+        # Guild.channels is GuildChannel only, so threads have to be walked
+        # separately or a forum server looks like it has no channels at all.
+        for thread in guild.threads:
+            backfill.register_channel(guild.id, thread)
         await self._refresh_invites(guild)
+        await self._refresh_facts(guild)
+        await self._catch_up_audit(guild)
         self._rooms[guild.id] = room.stored_id(guild.id)
 
         # Guild-scoped sync appears immediately, unlike the global sync.
@@ -118,11 +139,109 @@ class Cadybot(discord.Client):
         print("added to %s (%s)" % (guild.name, guild.id))
         await self._adopt(guild)
 
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        """Removed from a server means forgotten. Nothing is kept for later."""
+        self._rooms.pop(guild.id, None)
+        self._invite_uses.pop(guild.id, None)
+        print("removed from %s (%s); purged %d rows" % (guild.name, guild.id,
+                                                        db.purge_guild(guild.id)))
+
     async def on_guild_channel_delete(self, channel) -> None:
         guild = getattr(channel, "guild", None)
         if guild and self._rooms.get(guild.id) == channel.id:
             room.forget(guild.id)
             self._rooms[guild.id] = None
+
+    async def on_guild_channel_create(self, channel) -> None:
+        guild = getattr(channel, "guild", None)
+        if guild:
+            backfill.register_channel(guild.id, channel)
+
+    async def on_guild_channel_update(self, before, after) -> None:
+        guild = getattr(after, "guild", None)
+        if guild:
+            backfill.register_channel(guild.id, after)
+
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        # Not on_thread_join: discord.py splits THREAD_CREATE on the newly_created
+        # flag, and the join half also fires when cadybot is merely added to a
+        # thread that has existed for months.
+        backfill.register_channel(thread.guild.id, thread)
+
+    async def on_thread_update(self, before: discord.Thread, after: discord.Thread) -> None:
+        backfill.register_channel(after.guild.id, after)
+
+    async def _refresh_facts(self, guild: discord.Guild) -> None:
+        """Server settings cadybot can see, and honesty about the ones it cannot.
+
+        Every column left NULL means not readable. That has to stay distinct
+        from 0, because telling the founder onboarding is disabled when the truth
+        is that cadybot cannot read onboarding sends them to fix a setting that
+        was never broken.
+        """
+        facts = {
+            "widget_enabled": (
+                None if guild.widget_enabled is None else int(guild.widget_enabled)
+            ),
+            "boost_count": guild.premium_subscription_count,
+            "boost_tier": guild.premium_tier,
+            "verification_level": str(guild.verification_level),
+            "is_community": 1 if "COMMUNITY" in guild.features else 0,
+        }
+        # guild.onboarding() raises outside a Community server, so the feature
+        # flag is the gate rather than the exception handler.
+        if "COMMUNITY" in guild.features:
+            try:
+                onboarding = await guild.onboarding()
+            except (discord.Forbidden, discord.HTTPException):
+                facts["onboarding_readable"] = 0
+            else:
+                facts["onboarding_readable"] = 1
+                facts["onboarding_enabled"] = int(onboarding.enabled)
+                facts["onboarding_mode"] = str(onboarding.mode)
+                facts["onboarding_prompts"] = len(onboarding.prompts)
+                facts["onboarding_required_prompts"] = sum(
+                    1 for p in onboarding.prompts if p.required
+                )
+                facts["onboarding_default_channels"] = len(onboarding.default_channel_ids)
+        db.upsert_guild_facts(guild.id, facts)
+
+    async def _catch_up_audit(self, guild: discord.Guild) -> None:
+        """Bounded backfill of the moderation events missed while offline."""
+        for action in AUDIT_ACTIONS:
+            after = db.last_audit_entry_id(guild.id, action.value)
+            kwargs = {"action": action, "oldest_first": True, "limit": AUDIT_CATCHUP_LIMIT}
+            if after:
+                kwargs["after"] = discord.Object(id=after)
+            try:
+                async for entry in guild.audit_logs(**kwargs):
+                    self._store_audit(guild.id, entry)
+            except discord.Forbidden:
+                db.upsert_guild_facts(guild.id, {"audit_readable": 0})
+                return
+            except discord.HTTPException as exc:
+                print("  audit catch-up failed for %s: %s" % (guild.name, exc))
+                return
+        db.upsert_guild_facts(guild.id, {"audit_readable": 1})
+
+    def _store_audit(self, guild_id: int, entry) -> None:
+        if entry.action not in AUDIT_ACTIONS:
+            return
+        # Gateway audit entries are resolved against the cache, so target is
+        # usually a bare Object and occasionally nothing at all.
+        db.record_audit_event(
+            guild_id,
+            entry.id,
+            entry.action.value,
+            entry.user_id,
+            getattr(entry.target, "id", None),
+            db.iso(entry.created_at),
+            _audit_extra(entry),
+        )
+
+    async def on_audit_log_entry_create(self, entry) -> None:
+        if entry.guild is not None:
+            self._store_audit(entry.guild.id, entry)
 
     async def _refresh_invites(self, guild: discord.Guild) -> None:
         """Cache invite use-counts so a join can be attributed to an invite.
@@ -158,33 +277,79 @@ class Cadybot(discord.Client):
             message.guild.id, message.author.id, message.author.name,
             message.author.display_name, message.author.bot,
             db.iso(getattr(message.author, "joined_at", None)),
+            db.member_state(message.author),
         )
         db.upsert_message(
-            {
-                "guild_id": message.guild.id,
-                "channel_id": message.channel.id,
-                "message_id": message.id,
-                "author_id": message.author.id,
-                "created_at": db.iso(message.created_at),
-                "content": message.content or None,
-                "reply_to_id": message.reference.message_id if message.reference else None,
-                "attachments": len(message.attachments),
-                "reactions": 0,
-            }
+            backfill.message_row(message.guild.id, message.channel.id, message, 0)
+        )
+        # message.mentions comes from the gateway payload's mentions array, not
+        # from scanning the text, so it survives losing the Message Content
+        # intent. @everyone and @here are not in it and live on the message row.
+        db.add_mentions(
+            message.guild.id, message.id, message.author.id,
+            [user.id for user in message.mentions],
+            db.iso(message.created_at),
         )
 
+    def _outside_room(self, payload) -> bool:
+        """True when a raw event belongs to server life rather than the console."""
+        return bool(payload.guild_id) and payload.channel_id != self._rooms.get(
+            payload.guild_id
+        )
+
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        # The raw variant, because on_message_delete only fires for messages
+        # still in discord.py's 1000-entry cache. Under launchd the process runs
+        # for weeks, so nearly every deletion is of a message that aged out.
+        if self._outside_room(payload):
+            db.delete_messages(payload.guild_id, [payload.message_id])
+
+    async def on_raw_bulk_message_delete(
+        self, payload: discord.RawBulkMessageDeleteEvent
+    ) -> None:
+        if self._outside_room(payload):
+            db.delete_messages(payload.guild_id, list(payload.message_ids))
+
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        # Discord fires MESSAGE_UPDATE with no content key at all when its embed
+        # server finishes unfurling a link. On a server where people trade CAD
+        # models and print photos that is most update events, and acting on them
+        # would stamp an edit time on messages nobody touched.
+        if 'content' in payload.data and self._outside_room(payload):
+            db.update_message_content(
+                payload.guild_id,
+                payload.message_id,
+                payload.data['content'],
+                edited_at=db.iso(payload.message.edited_at),
+                flags=payload.message.flags.value,
+            )
+
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id and payload.channel_id != self._rooms.get(payload.guild_id):
-            db.bump_reactions(payload.guild_id, payload.message_id, 1)
+        if self._outside_room(payload):
+            db.add_reaction(
+                payload.guild_id, payload.message_id, payload.user_id, str(payload.emoji)
+            )
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
-        if payload.guild_id and payload.channel_id != self._rooms.get(payload.guild_id):
-            db.bump_reactions(payload.guild_id, payload.message_id, -1)
+        if self._outside_room(payload):
+            db.remove_reaction(
+                payload.guild_id, payload.message_id, payload.user_id, str(payload.emoji)
+            )
+
+    async def on_raw_reaction_clear(self, payload: discord.RawReactionClearEvent) -> None:
+        if self._outside_room(payload):
+            db.clear_reactions(payload.guild_id, payload.message_id)
+
+    async def on_raw_reaction_clear_emoji(
+        self, payload: discord.RawReactionClearEmojiEvent
+    ) -> None:
+        if self._outside_room(payload):
+            db.clear_reactions(payload.guild_id, payload.message_id, str(payload.emoji))
 
     async def on_member_join(self, member: discord.Member) -> None:
         db.upsert_member(
             member.guild.id, member.id, member.name, member.display_name,
-            member.bot, db.iso(member.joined_at),
+            member.bot, db.iso(member.joined_at), db.member_state(member),
         )
         code = await self._which_invite(member.guild)
         db.record_member_event(member.guild.id, member.id, "join", code)
@@ -198,6 +363,18 @@ class Cadybot(discord.Client):
             if uses > before.get(code, 0):
                 return code
         return None
+
+    async def on_member_update(self, before: discord.Member, after: discord.Member) -> None:
+        """The only event that fires when someone finishes onboarding.
+
+        pending goes True to False exactly once and nothing else reports it — a
+        member stuck pending never saw a single channel, which looks identical
+        to a member who joined and chose not to speak.
+        """
+        db.upsert_member(
+            after.guild.id, after.id, after.name, after.display_name,
+            after.bot, db.iso(after.joined_at), db.member_state(after),
+        )
 
     async def on_member_remove(self, member: discord.Member) -> None:
         db.mark_left(member.guild.id, member.id)
@@ -318,6 +495,29 @@ class Cadybot(discord.Client):
             except Exception:
                 traceback.print_exc()
 
+    @tasks.loop(hours=config.PRESENCE_SAMPLE_HOURS)
+    async def hourly_facts(self) -> None:
+        """Re-read the server settings, and sample how many people are online.
+
+        The cached Guild never has the approximate counts populated, so the
+        fetch is not optional. It costs one request an hour and is the only way
+        cadybot learns anything about members who are present and silent —
+        without it, "nobody is talking" and "nobody is here" look the same.
+        """
+        for guild in list(self.guilds):
+            try:
+                await self._refresh_facts(guild)
+                fetched = await self.fetch_guild(guild.id, with_counts=True)
+                db.record_presence_sample(
+                    guild.id,
+                    fetched.approximate_member_count,
+                    fetched.approximate_presence_count,
+                )
+            except discord.HTTPException as exc:
+                print("hourly refresh failed for %s: %s" % (guild.id, exc))
+            except Exception:
+                traceback.print_exc()
+
     @weekly_brief.before_loop
     async def _wait_weekly(self) -> None:
         await self.wait_until_ready()
@@ -325,6 +525,26 @@ class Cadybot(discord.Client):
     @daily_alerts.before_loop
     async def _wait_daily(self) -> None:
         await self.wait_until_ready()
+
+    @hourly_facts.before_loop
+    async def _wait_hourly(self) -> None:
+        await self.wait_until_ready()
+
+
+def _audit_extra(entry) -> Optional[str]:
+    """The numeric part of an audit entry's extras, and nothing else.
+
+    `extra` can carry channel names, automod rule names and moderator-supplied
+    reasons. None of that belongs in a database whose rows are fed to a model,
+    so only counts survive.
+    """
+    extra = getattr(entry, "extra", None)
+    fields = {}
+    for key in ("delete_member_days", "members_removed", "count"):
+        value = getattr(extra, key, None)
+        if isinstance(value, int):
+            fields[key] = value
+    return json.dumps(fields) if fields else None
 
 
 # --- slash commands --------------------------------------------------------

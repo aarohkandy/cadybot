@@ -8,7 +8,7 @@ strings, which sort lexicographically — that is the only reason they are text.
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from . import config
 
@@ -19,44 +19,92 @@ CREATE TABLE IF NOT EXISTS guilds (
     first_seen  TEXT NOT NULL
 );
 
+-- The thread columns are NULL for anything that is not a Thread. They are what
+-- makes "ten of twelve threads auto-archived at 1440 minutes with under four
+-- messages" answerable without re-walking Discord.
 CREATE TABLE IF NOT EXISTS channels (
-    guild_id    INTEGER NOT NULL,
-    channel_id  INTEGER NOT NULL,
-    name        TEXT,
-    kind        TEXT,
-    parent_id   INTEGER,
-    created_at  TEXT,
+    guild_id               INTEGER NOT NULL,
+    channel_id             INTEGER NOT NULL,
+    name                   TEXT,
+    kind                   TEXT,
+    parent_id              INTEGER,
+    created_at             TEXT,
+    archived               INTEGER,
+    archive_timestamp      TEXT,
+    auto_archive_duration  INTEGER,
+    thread_message_count   INTEGER,
+    parent_kind            TEXT,
     PRIMARY KEY (guild_id, channel_id)
 );
 
 CREATE TABLE IF NOT EXISTS members (
-    guild_id      INTEGER NOT NULL,
-    user_id       INTEGER NOT NULL,
-    username      TEXT,
-    display_name  TEXT,
-    is_bot        INTEGER NOT NULL DEFAULT 0,
-    joined_at     TEXT,
-    first_seen    TEXT NOT NULL,
-    left_at       TEXT,
-    invite_code   TEXT,
+    guild_id         INTEGER NOT NULL,
+    user_id          INTEGER NOT NULL,
+    username         TEXT,
+    display_name     TEXT,
+    is_bot           INTEGER NOT NULL DEFAULT 0,
+    joined_at        TEXT,
+    first_seen       TEXT NOT NULL,
+    left_at          TEXT,
+    invite_code      TEXT,
+    flags            INTEGER,
+    pending          INTEGER NOT NULL DEFAULT 0,
+    premium_since    TEXT,
+    timed_out_until  TEXT,
     PRIMARY KEY (guild_id, user_id)
 );
 
+-- `type` is Discord's MessageType: 0 is an ordinary message, 19 a reply, 21 the
+-- content-free mirror Discord posts in the parent channel when a thread starts.
+-- `ref_type` splits the one `reference` field Discord overloads: NULL for no
+-- reference, 0 for a genuine reply, 1 for a forward. A forward's text was
+-- authored in a server cadybot is not in and is never stored.
 CREATE TABLE IF NOT EXISTS messages (
-    guild_id     INTEGER NOT NULL,
-    channel_id   INTEGER NOT NULL,
-    message_id   INTEGER NOT NULL,
-    author_id    INTEGER NOT NULL,
-    created_at   TEXT NOT NULL,
-    content      TEXT,
-    reply_to_id  INTEGER,
-    attachments  INTEGER NOT NULL DEFAULT 0,
-    reactions    INTEGER NOT NULL DEFAULT 0,
+    guild_id          INTEGER NOT NULL,
+    channel_id        INTEGER NOT NULL,
+    message_id        INTEGER NOT NULL,
+    author_id         INTEGER NOT NULL,
+    created_at        TEXT NOT NULL,
+    content           TEXT,
+    reply_to_id       INTEGER,
+    attachments       INTEGER NOT NULL DEFAULT 0,
+    reactions         INTEGER NOT NULL DEFAULT 0,
+    type              INTEGER NOT NULL DEFAULT 0,
+    ref_type          INTEGER,
+    flags             INTEGER NOT NULL DEFAULT 0,
+    edited_at         TEXT,
+    mention_everyone  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS ix_messages_time    ON messages (guild_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_messages_channel ON messages (guild_id, channel_id, created_at);
 CREATE INDEX IF NOT EXISTS ix_messages_author  ON messages (guild_id, author_id, created_at);
+
+-- IDs only, never text. Populated from the gateway's mentions array rather than
+-- by scanning content, so it does not depend on the Message Content intent.
+-- @everyone and @here are not user mentions and live on messages instead.
+CREATE TABLE IF NOT EXISTS mentions (
+    guild_id      INTEGER NOT NULL,
+    message_id    INTEGER NOT NULL,
+    author_id     INTEGER NOT NULL,
+    mentioned_id  INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (guild_id, message_id, mentioned_id)
+);
+CREATE INDEX IF NOT EXISTS ix_mentions_time ON mentions (guild_id, created_at);
+
+-- One row per person per emoji, so messages.reactions can be recomputed rather
+-- than incremented. A counter moved by deltas drifts upward forever the first
+-- time a remove or clear event is missed.
+CREATE TABLE IF NOT EXISTS reactions (
+    guild_id    INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    emoji       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (guild_id, message_id, user_id, emoji)
+);
+CREATE INDEX IF NOT EXISTS ix_reactions_msg ON reactions (guild_id, message_id);
 
 CREATE TABLE IF NOT EXISTS member_events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +181,78 @@ CREATE TABLE IF NOT EXISTS settings (
     value     TEXT,
     PRIMARY KEY (guild_id, key)
 );
+
+-- Server configuration cadybot can observe. NULL means NOT READABLE and must
+-- stay distinguishable from 0: reporting "onboarding is off" when the truth is
+-- "cadybot cannot see onboarding" sends the founder to fix a setting that is
+-- already correct.
+CREATE TABLE IF NOT EXISTS guild_facts (
+    guild_id                     INTEGER PRIMARY KEY,
+    at                           TEXT NOT NULL,
+    onboarding_enabled           INTEGER,
+    onboarding_mode              TEXT,
+    onboarding_prompts           INTEGER,
+    onboarding_required_prompts  INTEGER,
+    onboarding_default_channels  INTEGER,
+    widget_enabled               INTEGER,
+    boost_count                  INTEGER,
+    boost_tier                   INTEGER,
+    verification_level           TEXT,
+    is_community                 INTEGER,
+    audit_readable               INTEGER,
+    onboarding_readable          INTEGER
+);
+
+-- The only signal cadybot gets about members who are present but never speak.
+-- Both counts come from a fetched guild; the cached object leaves them unset.
+CREATE TABLE IF NOT EXISTS presence_samples (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id        INTEGER NOT NULL,
+    at              TEXT NOT NULL,
+    approx_members  INTEGER,
+    approx_online   INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_presence ON presence_samples (guild_id, at);
+
+-- A narrow moderation slice of the audit log. Kicks, bans and prunes are the
+-- only leaves Discord will ever tell us the reason for; everything else in the
+-- audit log is server administration and says nothing about community health.
+CREATE TABLE IF NOT EXISTS audit_events (
+    guild_id    INTEGER NOT NULL,
+    entry_id    INTEGER NOT NULL,
+    action      INTEGER NOT NULL,
+    user_id     INTEGER,
+    target_id   INTEGER,
+    at          TEXT NOT NULL,
+    extra_json  TEXT,
+    PRIMARY KEY (guild_id, entry_id)
+);
+CREATE INDEX IF NOT EXISTS ix_audit ON audit_events (guild_id, at);
 """
+
+# CREATE TABLE IF NOT EXISTS will not add a column to a table that already
+# exists, so every column introduced after a release has to appear twice: in
+# SCHEMA, so a fresh database is right, and here, so the live one catches up.
+MIGRATIONS: List[Tuple[str, str, str]] = [
+    ("messages", "type", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "ref_type", "INTEGER"),
+    ("messages", "flags", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "edited_at", "TEXT"),
+    ("messages", "mention_everyone", "INTEGER NOT NULL DEFAULT 0"),
+    ("channels", "archived", "INTEGER"),
+    ("channels", "archive_timestamp", "TEXT"),
+    ("channels", "auto_archive_duration", "INTEGER"),
+    ("channels", "thread_message_count", "INTEGER"),
+    ("channels", "parent_kind", "TEXT"),
+    ("members", "flags", "INTEGER"),
+    ("members", "pending", "INTEGER NOT NULL DEFAULT 0"),
+    ("members", "premium_since", "TEXT"),
+    ("members", "timed_out_until", "TEXT"),
+]
+
+# Settings row marking the one-off phantom sweep as already done. guild_id 0 is
+# not a real server, so it cannot collide with a per-guild setting.
+CLEANUP_KEY = "cleanup_thread_starters"
 
 
 def now() -> str:
@@ -167,7 +286,49 @@ def connect() -> sqlite3.Connection:
         _conn.execute("PRAGMA journal_mode=WAL")
         _conn.execute("PRAGMA foreign_keys=ON")
         _conn.executescript(SCHEMA)
+        _migrate(_conn)
     return _conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns SCHEMA declares that an older database is missing.
+
+    Every ALTER is guarded by the PRAGMA rather than by catching the error, so a
+    second run is a silent no-op and an unexpected schema cannot abort startup.
+    """
+    for table, column, decl in MIGRATIONS:
+        present = {row[1] for row in conn.execute("PRAGMA table_info(%s)" % table)}
+        if not present:
+            continue  # table does not exist here; SCHEMA above owns creating it
+        if column not in present:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, decl))
+    _sweep_thread_starters(conn)
+
+
+def _sweep_thread_starters(conn: sqlite3.Connection) -> None:
+    """One-off removal of the phantom rows earlier ingest mistook for messages.
+
+    When a thread is created from a message Discord posts a type-21 mirror in the
+    parent channel. It has no content and no attachments, but it does carry a
+    reference, so it was being stored as both a message and a reply. On the live
+    database that was 12 of 100 rows and 12 of the 17 replies — enough to move
+    every rate downstream. Ingest no longer treats those references as replies,
+    which makes this signature safe to delete once.
+    """
+    if conn.execute(
+        "SELECT 1 FROM settings WHERE guild_id=0 AND key=?", (CLEANUP_KEY,)
+    ).fetchone():
+        return
+    removed = conn.execute(
+        "DELETE FROM messages WHERE content IS NULL AND attachments = 0 "
+        "AND reply_to_id IS NOT NULL"
+    ).rowcount
+    conn.execute(
+        "INSERT INTO settings (guild_id, key, value) VALUES (0, ?, ?)",
+        (CLEANUP_KEY, str(removed)),
+    )
+    if removed:
+        print("removed %d phantom thread-starter rows" % removed)
 
 
 @contextmanager
@@ -216,14 +377,45 @@ def upsert_channel(
     kind: str,
     parent_id: Optional[int],
     created_at: Optional[str],
+    archived: Optional[int] = None,
+    archive_timestamp: Optional[str] = None,
+    auto_archive_duration: Optional[int] = None,
+    thread_message_count: Optional[int] = None,
+    parent_kind: Optional[str] = None,
 ) -> None:
     connect().execute(
-        "INSERT INTO channels (guild_id, channel_id, name, kind, parent_id, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "INSERT INTO channels (guild_id, channel_id, name, kind, parent_id, created_at, "
+        "archived, archive_timestamp, auto_archive_duration, thread_message_count, parent_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(guild_id, channel_id) DO UPDATE SET "
-        "name=excluded.name, kind=excluded.kind, parent_id=excluded.parent_id",
-        (guild_id, channel_id, name, kind, parent_id, created_at),
+        "name=excluded.name, kind=excluded.kind, parent_id=excluded.parent_id, "
+        "archived=excluded.archived, archive_timestamp=excluded.archive_timestamp, "
+        "auto_archive_duration=excluded.auto_archive_duration, "
+        "thread_message_count=excluded.thread_message_count, parent_kind=excluded.parent_kind",
+        (
+            guild_id, channel_id, name, kind, parent_id, created_at,
+            archived, archive_timestamp, auto_archive_duration,
+            thread_message_count, parent_kind,
+        ),
     )
+
+
+def member_state(member: Any) -> Optional[Dict[str, Any]]:
+    """The fields only a real Member carries, or None for a bare User.
+
+    A message author who has since left the server arrives as a User with no
+    onboarding or timeout state at all. Returning None there lets upsert_member
+    tell "not a member object" apart from "member with nothing set", so stale
+    facts are kept instead of being blanked by an ordinary message.
+    """
+    if not hasattr(member, "pending") or not hasattr(member, "flags"):
+        return None
+    return {
+        "flags": getattr(member.flags, "value", None),
+        "pending": bool(member.pending),
+        "premium_since": iso(getattr(member, "premium_since", None)),
+        "timed_out_until": iso(getattr(member, "timed_out_until", None)),
+    }
 
 
 def upsert_member(
@@ -233,8 +425,10 @@ def upsert_member(
     display_name: Optional[str],
     is_bot: bool,
     joined_at: Optional[str],
+    state: Optional[Dict[str, Any]] = None,
 ) -> None:
-    connect().execute(
+    conn = connect()
+    conn.execute(
         "INSERT INTO members (guild_id, user_id, username, display_name, is_bot, joined_at, first_seen) "
         "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(guild_id, user_id) DO UPDATE SET "
@@ -242,6 +436,20 @@ def upsert_member(
         "is_bot=excluded.is_bot, joined_at=COALESCE(members.joined_at, excluded.joined_at), "
         "left_at=NULL",
         (guild_id, user_id, username, display_name, 1 if is_bot else 0, joined_at, now()),
+    )
+    if state is None:
+        return
+    conn.execute(
+        "UPDATE members SET flags=?, pending=?, premium_since=?, timed_out_until=? "
+        "WHERE guild_id=? AND user_id=?",
+        (
+            state.get("flags"),
+            1 if state.get("pending") else 0,
+            state.get("premium_since"),
+            state.get("timed_out_until"),
+            guild_id,
+            user_id,
+        ),
     )
 
 
@@ -262,22 +470,132 @@ def record_member_event(
 
 
 def upsert_message(row: Dict[str, Any]) -> None:
+    """Insert or refresh one message.
+
+    Columns added after the first release may be omitted by the caller and fall
+    back to the same values the schema defaults to, so a row built by an older
+    caller is still a valid row.
+    """
+    params = {
+        "guild_id": row["guild_id"],
+        "channel_id": row["channel_id"],
+        "message_id": row["message_id"],
+        "author_id": row["author_id"],
+        "created_at": row["created_at"],
+        "content": row.get("content"),
+        "reply_to_id": row.get("reply_to_id"),
+        "attachments": row.get("attachments") or 0,
+        "reactions": row.get("reactions") or 0,
+        "type": row.get("type") or 0,
+        "ref_type": row.get("ref_type"),
+        "flags": row.get("flags") or 0,
+        "edited_at": row.get("edited_at"),
+        "mention_everyone": 1 if row.get("mention_everyone") else 0,
+    }
     connect().execute(
         "INSERT INTO messages (guild_id, channel_id, message_id, author_id, created_at, "
-        "content, reply_to_id, attachments, reactions) "
+        "content, reply_to_id, attachments, reactions, type, ref_type, flags, edited_at, "
+        "mention_everyone) "
         "VALUES (:guild_id, :channel_id, :message_id, :author_id, :created_at, "
-        ":content, :reply_to_id, :attachments, :reactions) "
+        ":content, :reply_to_id, :attachments, :reactions, :type, :ref_type, :flags, "
+        ":edited_at, :mention_everyone) "
         "ON CONFLICT(guild_id, message_id) DO UPDATE SET "
-        "content=excluded.content, reactions=excluded.reactions",
-        row,
+        "content=excluded.content, reactions=excluded.reactions, "
+        "edited_at=excluded.edited_at, flags=excluded.flags",
+        params,
     )
 
 
-def bump_reactions(guild_id: int, message_id: int, delta: int) -> None:
+def update_message_content(
+    guild_id: int,
+    message_id: int,
+    content: Optional[str],
+    edited_at: Optional[str] = None,
+    flags: Optional[int] = None,
+) -> None:
     connect().execute(
-        "UPDATE messages SET reactions = MAX(0, reactions + ?) WHERE guild_id=? AND message_id=?",
-        (delta, guild_id, message_id),
+        "UPDATE messages SET content=?, edited_at=COALESCE(?, edited_at), "
+        "flags=COALESCE(?, flags) WHERE guild_id=? AND message_id=?",
+        (content or None, edited_at, flags, guild_id, message_id),
     )
+
+
+def delete_messages(guild_id: int, message_ids: List[int]) -> int:
+    """Hard delete, cascading to mentions and reactions.
+
+    Someone deleting their own message is the clearest signal there is that
+    keeping it is no longer warranted, so nothing is retained — not a tombstone,
+    not the text, not the reactions it collected.
+    """
+    if not message_ids:
+        return 0
+    conn = connect()
+    marks = ",".join("?" * len(message_ids))
+    params = tuple([guild_id] + list(message_ids))
+    for table in ("mentions", "reactions"):
+        conn.execute(
+            "DELETE FROM %s WHERE guild_id=? AND message_id IN (%s)" % (table, marks), params
+        )
+    return conn.execute(
+        "DELETE FROM messages WHERE guild_id=? AND message_id IN (%s)" % marks, params
+    ).rowcount
+
+
+def add_mentions(
+    guild_id: int,
+    message_id: int,
+    author_id: int,
+    mentioned_ids: List[int],
+    created_at: str,
+) -> None:
+    conn = connect()
+    for mentioned_id in mentioned_ids:
+        conn.execute(
+            "INSERT OR IGNORE INTO mentions "
+            "(guild_id, message_id, author_id, mentioned_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (guild_id, message_id, author_id, mentioned_id, created_at),
+        )
+
+
+def _recount_reactions(guild_id: int, message_id: int) -> None:
+    """Derive messages.reactions from the rows rather than nudging a counter."""
+    connect().execute(
+        "UPDATE messages SET reactions = "
+        "(SELECT COUNT(*) FROM reactions WHERE guild_id=? AND message_id=?) "
+        "WHERE guild_id=? AND message_id=?",
+        (guild_id, message_id, guild_id, message_id),
+    )
+
+
+def add_reaction(guild_id: int, message_id: int, user_id: int, emoji: str) -> None:
+    connect().execute(
+        "INSERT OR IGNORE INTO reactions (guild_id, message_id, user_id, emoji, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (guild_id, message_id, user_id, emoji, now()),
+    )
+    _recount_reactions(guild_id, message_id)
+
+
+def remove_reaction(guild_id: int, message_id: int, user_id: int, emoji: str) -> None:
+    connect().execute(
+        "DELETE FROM reactions WHERE guild_id=? AND message_id=? AND user_id=? AND emoji=?",
+        (guild_id, message_id, user_id, emoji),
+    )
+    _recount_reactions(guild_id, message_id)
+
+
+def clear_reactions(guild_id: int, message_id: int, emoji: Optional[str] = None) -> None:
+    """Wipe every reaction on a message, or every use of one emoji on it."""
+    if emoji is None:
+        connect().execute(
+            "DELETE FROM reactions WHERE guild_id=? AND message_id=?", (guild_id, message_id)
+        )
+    else:
+        connect().execute(
+            "DELETE FROM reactions WHERE guild_id=? AND message_id=? AND emoji=?",
+            (guild_id, message_id, emoji),
+        )
+    _recount_reactions(guild_id, message_id)
 
 
 def open_voice(guild_id: int, channel_id: int, user_id: int) -> None:
@@ -426,11 +744,99 @@ def purge_member(guild_id: int, user_id: int) -> int:
     """Delete everything about one member. Data-deletion requests land here."""
     conn = connect()
     removed = 0
-    for sql in (
-        "DELETE FROM messages WHERE guild_id=? AND author_id=?",
-        "DELETE FROM member_events WHERE guild_id=? AND user_id=?",
-        "DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?",
-        "DELETE FROM members WHERE guild_id=? AND user_id=?",
+    for sql, params in (
+        ("DELETE FROM messages WHERE guild_id=? AND author_id=?", (guild_id, user_id)),
+        (
+            "DELETE FROM mentions WHERE guild_id=? AND (author_id=? OR mentioned_id=?)",
+            (guild_id, user_id, user_id),
+        ),
+        ("DELETE FROM reactions WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
+        ("DELETE FROM member_events WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
+        ("DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
+        ("DELETE FROM members WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
     ):
-        removed += conn.execute(sql, (guild_id, user_id)).rowcount
+        removed += conn.execute(sql, params).rowcount
     return removed
+
+
+# Every table keyed by guild_id. Kept as a list rather than discovered at
+# runtime so adding a table without deciding what leaving a server means to it
+# is a visible omission instead of a silent leak.
+GUILD_TABLES = (
+    "messages", "mentions", "reactions", "member_events", "voice_sessions",
+    "invite_uses", "recommendations", "runs", "conversation", "channels",
+    "members", "guild_facts", "presence_samples", "audit_events", "settings",
+    "guilds",
+)
+
+
+def purge_guild(guild_id: int) -> int:
+    """Forget one server completely. Being removed means being forgotten."""
+    conn = connect()
+    removed = 0
+    for table in GUILD_TABLES:
+        removed += conn.execute(
+            "DELETE FROM %s WHERE guild_id=?" % table, (guild_id,)
+        ).rowcount
+    return removed
+
+
+# The writable columns of guild_facts. Callers name a subset and the rest keep
+# whatever they held, so a permission failure on one lookup cannot blank a fact
+# a different lookup already established.
+GUILD_FACT_COLUMNS = (
+    "onboarding_enabled", "onboarding_mode", "onboarding_prompts",
+    "onboarding_required_prompts", "onboarding_default_channels",
+    "widget_enabled", "boost_count", "boost_tier", "verification_level",
+    "is_community", "audit_readable", "onboarding_readable",
+)
+
+
+def upsert_guild_facts(guild_id: int, facts: Dict[str, Any]) -> None:
+    cols = [c for c in GUILD_FACT_COLUMNS if c in facts]
+    connect().execute(
+        "INSERT INTO guild_facts (guild_id, at%s) VALUES (?, ?%s) "
+        "ON CONFLICT(guild_id) DO UPDATE SET at=excluded.at%s"
+        % (
+            "".join(", " + c for c in cols),
+            ", ?" * len(cols),
+            "".join(", %s=excluded.%s" % (c, c) for c in cols),
+        ),
+        tuple([guild_id, now()] + [facts[c] for c in cols]),
+    )
+
+
+def record_presence_sample(
+    guild_id: int, approx_members: Optional[int], approx_online: Optional[int]
+) -> None:
+    connect().execute(
+        "INSERT INTO presence_samples (guild_id, at, approx_members, approx_online) "
+        "VALUES (?, ?, ?, ?)",
+        (guild_id, now(), approx_members, approx_online),
+    )
+
+
+def record_audit_event(
+    guild_id: int,
+    entry_id: int,
+    action: int,
+    user_id: Optional[int],
+    target_id: Optional[int],
+    at: Optional[str],
+    extra_json: Optional[str] = None,
+) -> None:
+    connect().execute(
+        "INSERT OR IGNORE INTO audit_events "
+        "(guild_id, entry_id, action, user_id, target_id, at, extra_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (guild_id, entry_id, action, user_id, target_id, at or now(), extra_json),
+    )
+
+
+def last_audit_entry_id(guild_id: int, action: int) -> int:
+    """Where a bounded audit catch-up should resume from. 0 means never seen."""
+    return scalar(
+        "SELECT MAX(entry_id) FROM audit_events WHERE guild_id=? AND action=?",
+        (guild_id, action),
+        default=0,
+    )
