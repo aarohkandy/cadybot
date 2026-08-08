@@ -65,6 +65,9 @@ class Verdict(BaseModel):
         ge=0, le=100, description="The same call as a percentage, 0-100."
     )
 
+    # Set after generation, never by the model, and excluded from the schema.
+    _unverified: List[str] = PrivateAttr(default_factory=list)
+
 
 class Recommendation(BaseModel):
     evidence: str = Field(
@@ -400,7 +403,7 @@ def ask(
     guild_id: Optional[int] = None,
     backend: Optional[str] = None,
 ) -> Verdict:
-    return llm.generate(
+    result = llm.generate(
         prompts.stable_prefix(),
         _turn(prompts.ASK_INSTRUCTION, snap, question),
         Verdict,
@@ -408,6 +411,20 @@ def ask(
         guild_id or config.GUILD_ID,
         backend=backend,
     )
+    # Brief has had this since the beginning; ask did not, and a verdict is the
+    # answer the founder is most likely to act on immediately. Observed on the
+    # live server: the snapshot said one human and four bots, and the model
+    # wrote "the server has 7 members" -- a number it read out of an
+    # illustrative example in the prompt rather than out of the data.
+    result._unverified = sorted(
+        set(
+            token
+            for text in (result.evidence, result.instead, result.reasoning)
+            if text
+            for token in verify_evidence(snap, text)
+        )
+    )
+    return result
 
 
 def brief(
@@ -561,6 +578,12 @@ def render_verdict(v: Verdict) -> str:
         lines += ["", "_Low confidence (%d%%) — not enough data yet to be sure._" % v.confidence_pct]
     else:
         lines += ["", "_Confidence: %s (%d%%)._" % (v.confidence, v.confidence_pct)]
+    if v._unverified:
+        lines += [
+            "",
+            "_These numbers appear nowhere in the snapshot: %s. Check them before "
+            "acting._" % ", ".join(v._unverified),
+        ]
     lines += ["", "_%s_" % llm.describe()]
     return "\n".join(lines)
 

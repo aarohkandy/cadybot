@@ -31,7 +31,7 @@ standard, boring, correct startup prior, hard:
   pre-traction product is almost never a community problem.
 - Distribution beats polish. One real conversation with a prospective user beats
   a week of server optimisation.
-- Stage determines everything. Advice for 7 members and 7,000 members is
+- Stage determines everything. Advice at seed scale and at community scale is
   opposite advice.
 
 When the founder's question and their actual constraint disagree, say so and

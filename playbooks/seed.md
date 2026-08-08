@@ -60,6 +60,6 @@ more than one step, adding channels, welcome bots.
 Economy and progression mechanics genuinely work: progression, status,
 leaderboards, daily-return loops, a prestige endgame. They work because a crowd
 generates the competition and the audience that make status worth having. They
-are a **growing**-stage play (100+ members), and running them at seven members
+are a **growing**-stage play (100+ members), and running them at seed scale
 produces a leaderboard with one name on it. Recommend them when the stage gate
 opens, and not before.
