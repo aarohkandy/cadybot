@@ -95,10 +95,16 @@ class Cadybot(discord.Client):
         for guild in self.guilds:
             await self._adopt(guild)
 
-        if not self.weekly_brief.is_running():
-            self.weekly_brief.start()
-        if not self.daily_alerts.is_running():
-            self.daily_alerts.start()
+        # hourly_facts always runs: it is ingest, not reporting, and it is the
+        # heartbeat the health check reads. Only the two reporting passes are
+        # handed to cron.
+        if config.SCHEDULER == "cron":
+            print("scheduler: cron (weekly/nightly run via `cadybot post`)")
+        else:
+            if not self.weekly_brief.is_running():
+                self.weekly_brief.start()
+            if not self.daily_alerts.is_running():
+                self.daily_alerts.start()
         if not self.hourly_facts.is_running():
             self.hourly_facts.start()
 

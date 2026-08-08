@@ -35,6 +35,11 @@ DB_PATH = ROOT / (os.getenv("CADYBOT_DB") or "cadybot.db")
 CONTEXT_DIR = ROOT / "context"
 PLAYBOOK_DIR = ROOT / "playbooks"
 
+# "internal" runs the reporting passes inside the listener; "cron" leaves them
+# to an external scheduler calling `python -m cadybot post`. Exactly one must be
+# in charge, or the founder gets every brief twice.
+SCHEDULER = (os.getenv("CADYBOT_SCHEDULER") or "internal").strip().lower()
+
 # The private channel cadybot creates and manages. It is the only channel in the
 # server cadybot is permitted to write to, and its member list is yours to edit.
 ROOM_NAME = (os.getenv("CADYBOT_ROOM") or "cadybot").strip().lower()

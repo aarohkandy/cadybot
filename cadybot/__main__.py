@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import sys
+import traceback
 from typing import Optional
 
 import discord
@@ -95,6 +96,42 @@ def _invite() -> int:
     return 0
 
 
+def _post(kind: str, guild_id: int) -> int:
+    """Run one scheduled pass and deliver it, then exit.
+
+    The listener holds the long-lived gateway connection; this opens a second,
+    short one just long enough to post. Discord allows concurrent sessions for a
+    bot — that is how sharding works — so this does not disturb the listener.
+
+    Delivery is the point. `cadybot loop` computes the same pass with client=None
+    and deliberately does not deliver, which is what you want when testing.
+    """
+    config.require_discord()
+    from . import loop as passes
+
+    client = discord.Client(intents=listener.INTENTS)
+    status = {"code": 1}
+
+    @client.event
+    async def on_ready():
+        try:
+            if client.get_guild(guild_id) is None:
+                print("cadybot is not in server %s" % guild_id)
+                return
+            text = await (passes.weekly if kind == "weekly" else passes.nightly)(
+                client, guild_id
+            )
+            print("delivered %d chars" % len(text) if text else "nothing worth saying")
+            status["code"] = 0
+        except Exception:
+            traceback.print_exc()
+        finally:
+            await client.close()
+
+    client.run(config.DISCORD_TOKEN, log_handler=None)
+    return status["code"]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cadybot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -117,6 +154,9 @@ def main(argv=None) -> int:
     with_guild("outcomes", "past recommendations and their outcomes")
     with_guild("score", "grade recommendations past their horizon, no LLM")
     with_guild("loop", "run one nightly pass without delivering it")
+
+    post = with_guild("post", "run a scheduled pass AND deliver it (for cron)")
+    post.add_argument("kind", choices=["nightly", "weekly"])
 
     ask = with_guild("ask", "a straight yes / no / not-yet")
     ask.add_argument("question", nargs="+")
@@ -159,6 +199,9 @@ def main(argv=None) -> int:
         return 0
 
     guild_id = _resolve_guild(args.guild)
+
+    if args.command == "post":
+        return _post(args.kind, guild_id)
 
     if args.command == "backfill":
         _one_shot_backfill(guild_id)
