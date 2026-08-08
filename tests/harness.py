@@ -379,6 +379,11 @@ def thread_culture(b):
         b.thread(200 + i, "thread-%d" % i, 10, archived=1 if i < 10 else 0, messages=2 + i % 3)
     b.chatter(list(range(1, 60)), [10], 120)
     return {
+        # The bug this pins: threads and categories were counted as channels, so
+        # a server with one text channel and twelve threads reported 13 and got
+        # told to prune them. Threads are conversations, not structure.
+        "channels.count": 1,
+        "dead_channels.count": lambda v: v <= 1,
         "threads.total": 12,
         "threads.archived": 10,
         "threads.still_active": 2,

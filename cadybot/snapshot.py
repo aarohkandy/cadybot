@@ -76,6 +76,12 @@ def _name(row: Any) -> str:
 # everywhere.
 HUMAN_TYPES = "(0, 19)"
 
+# Channel kinds a founder can restructure. Threads and categories are excluded
+# deliberately -- see the comment at the channels query.
+PRUNABLE_KINDS = (
+    "('TextChannel', 'VoiceChannel', 'ForumChannel', 'StageChannel', 'NewsChannel')"
+)
+
 # A snapshot must stay roughly the same size whether the server has 7 members
 # or 50,000, because it has to fit in a context window either way. Anything
 # that grows with member count is reported as a count plus a sample; the model
@@ -812,8 +818,14 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         (guild_id, owner_id, db.days_ago(7)),
     )
 
-    # cadybot's own private channel is not part of the server's life; counting
-    # its briefs as activity would let it flatter itself.
+    # What a founder can actually merge or delete. Threads are conversations,
+    # not structure -- they have their own block -- and a category is a folder.
+    # Counting them here produced "you have 14 channels, prune them" on a server
+    # with one real text channel and twelve threads inside it, which is advice to
+    # delete the only conversations the server has ever had.
+    #
+    # cadybot's own private channel is not part of the server's life either;
+    # counting its briefs as activity would let it flatter itself.
     private_id = room.stored_id(guild_id) or -1
     channel_rows = db.query(
         "SELECT c.name, c.kind, c.archived, "
@@ -825,6 +837,7 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         "  ON m.guild_id = c.guild_id AND m.channel_id = c.channel_id "
         "  AND m.type IN " + HUMAN_TYPES + " AND m.created_at >= ? "
         "WHERE c.guild_id = ? AND c.channel_id != ? "
+        "  AND c.kind IN " + PRUNABLE_KINDS + " "
         "GROUP BY c.channel_id ORDER BY msgs DESC",
         (db.days_ago(30), guild_id, private_id),
     )
@@ -838,14 +851,7 @@ def build(guild_id: Optional[int] = None, owner_id: Optional[int] = None) -> Dic
         }
         for r in channel_rows
     ]
-    # An archived thread is supposed to be silent, so it is not a dead channel.
-    # Left in, they would fill the sample cap on any server that uses threads and
-    # bury the channels that are genuinely abandoned.
-    dead = [
-        r["name"]
-        for r in channel_rows
-        if not r["msgs"] and not (r["kind"] == "Thread" and r["archived"])
-    ]
+    dead = [r["name"] for r in channel_rows if not r["msgs"]]
 
     joins_30 = db.scalar(
         "SELECT COUNT(*) FROM member_events WHERE guild_id=? AND event='join' AND at>=?",
