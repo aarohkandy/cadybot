@@ -14,7 +14,10 @@ from typing import Optional
 
 import discord
 
-from . import advisor, backfill, config, db, listener, llm, loop, room, scorecard, snapshot
+from . import (
+    advisor, agenda, backfill, config, db, ledger, listener, llm, loop, room,
+    scorecard, snapshot, thinking,
+)
 
 
 def _known_guilds():
@@ -132,6 +135,36 @@ def _post(kind: str, guild_id: int) -> int:
     return status["code"]
 
 
+def _think(guild_id: int) -> int:
+    """Run one pass of the desk and deliver anything it decides is worth saying.
+
+    Same short second gateway session as `_post`, for the same reason. This is
+    the cron entry point when CADYBOT_SCHEDULER=cron; under the default
+    scheduler the listener runs it in-process and this is for running by hand.
+    """
+    config.require_discord()
+
+    client = discord.Client(intents=listener.INTENTS)
+    status = {"code": 1}
+
+    @client.event
+    async def on_ready():
+        try:
+            if client.get_guild(guild_id) is None:
+                print("cadybot is not in server %s" % guild_id)
+                return
+            text = await thinking.think(client, guild_id)
+            print("said %d chars" % len(text) if text else "thought nothing worth saying")
+            status["code"] = 0
+        except Exception:
+            traceback.print_exc()
+        finally:
+            await client.close()
+
+    client.run(config.DISCORD_TOKEN, log_handler=None)
+    return status["code"]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="cadybot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -150,6 +183,11 @@ def main(argv=None) -> int:
 
     with_guild("backfill", "import history and exit")
     with_guild("snapshot", "print the raw numbers, no LLM")
+
+    led = with_guild("ledger", "the daily history of one metric, no LLM")
+    led.add_argument("--metric", help="a ledger.LEDGER_METRICS path")
+    led.add_argument("--days", type=int, default=30)
+
     with_guild("brief", "ranked recommendations")
     with_guild("outcomes", "past recommendations and their outcomes")
     with_guild("score", "grade recommendations past their horizon, no LLM")
@@ -157,6 +195,10 @@ def main(argv=None) -> int:
 
     post = with_guild("post", "run a scheduled pass AND deliver it (for cron)")
     post.add_argument("kind", choices=["nightly", "weekly"])
+
+    with_guild("reflect", "what the desk would think about right now, no LLM")
+    with_guild("think", "run one pass of the desk AND deliver it (for cron)")
+    with_guild("notes", "everything the desk thought, said or not")
 
     ask = with_guild("ask", "a straight yes / no / not-yet")
     ask.add_argument("question", nargs="+")
@@ -209,6 +251,73 @@ def main(argv=None) -> int:
 
     if args.command == "snapshot":
         print(json.dumps(snapshot.build(guild_id), indent=2, default=str))
+        return 0
+
+    if args.command == "reflect":
+        state = thinking.preview(guild_id)
+        print("budget      : %d of %d used in the last 24h%s"
+              % (state["spent_today"], state["budget"],
+                 "" if state["affordable"] else "  (spent)"))
+        if state["provocation"] is None:
+            print("provocation : none — %s" % state["why"])
+            return 0
+        print("provocation : %s, from %s%s"
+              % (state["provocation"], state["provoked_by"],
+                 " (%s)" % state["about"] if state["about"] else ""))
+        print("would speak : %s — %s"
+              % ("yes" if state["would_surface"] else "no", state["why"]))
+        print("\n--- the question it would ask itself ---\n")
+        print(state["self_prompt"])
+        return 0
+
+    if args.command == "think":
+        return _think(guild_id)
+
+    if args.command == "notes":
+        rows = agenda.recent(guild_id, limit=20)
+        if not rows:
+            print("The desk has not thought about anything yet.")
+            print("Run `reflect` to see what it is waiting for.")
+            return 0
+        for row in rows:
+            mark = {"thought": " ", "failed": "!", "started": "~"}.get(row["outcome"], "?")
+            said = "spoke" if row["surfaced_at"] else "kept it"
+            print("%s %-8s %s  %s" % (mark, row["kind"], row["started_at"][:16], said))
+            if row["about_ref"]:
+                print("    about   %s" % row["about_ref"])
+            if row["failure"]:
+                print("    failed  %s" % row["failure"])
+            if row["note_to_self"]:
+                print("    note    %s" % row["note_to_self"])
+            if row["to_founder"] and not row["surfaced_at"]:
+                # Say why it was withheld. Printing the sentence bare made a
+                # thought suppressed for citing an unverifiable figure look
+                # identical to one merely waiting for a good moment.
+                unver = (row["unverified"] or "").strip()
+                if unver not in ("", "[]"):
+                    print("    UNSAID  (unverified %s) %s" % (unver, row["to_founder"][:140]))
+                elif not row["wanted_telling"]:
+                    print("    unsaid  (not worth telling) %s" % row["to_founder"][:140])
+                else:
+                    print("    unsaid  (waiting) %s" % row["to_founder"][:140])
+        return 0
+
+    if args.command == "ledger":
+        if not args.metric:
+            print("Recorded metrics (%d days closed):" % ledger.days_recorded(guild_id))
+            for path in ledger.LEDGER_METRICS:
+                print("  %s" % path)
+            print("\nPass --metric <path> for its history.")
+            return 0
+        if args.metric not in ledger.LEDGER_METRICS:
+            print("%r is not a ledger metric. Run `ledger` with no --metric." % args.metric)
+            return 1
+        rows = ledger.series(guild_id, args.metric, args.days)
+        if not rows:
+            print("No closes recorded yet. The ledger fills in once an hour.")
+            return 0
+        for row in rows:
+            print("%s  %s" % (row["day"], advisor.fmt_number(row["value"])))
         return 0
 
     if args.command == "ask":

@@ -214,3 +214,53 @@ and are rendered above your brief. Do not assess, re-grade, or allude to how
 your own previous advice turned out — there is no field for it and no version of
 it that belongs in your text.
 """
+
+
+REFLECT_INSTRUCTION = """\
+Nobody asked you anything. Something happened on this server, code noticed it,
+and you are being handed it to think about. This is not a report and it is not
+advice — it is you working something out for your own benefit, and almost all of
+it stays private.
+
+Everything above still applies: the stage gates are hard rules, every claim is
+grounded in the snapshot, and you did not compute any of these numbers.
+
+There is no credit here for finding something. "Nothing changed that I can tell
+from this, and here is the number that says so" is a complete and frequently
+correct answer, and it is the right one more often than not on a small server.
+Do not build a story out of one message, one join, or one fortnight.
+
+`restated` is the thing that happened, put as a neutral question in your own
+words — you are writing the question as well as the answer, so say what you are
+actually asking rather than what would be impressive to ask.
+
+`note_to_self` is the only part of this that survives. It is carried into a
+later brief and read cold, by you, with no memory of today. Write it
+qualitatively and do not put a number in it: anything numeric will be in the
+snapshot when you read it back, and a number written down today is simply wrong
+in a month. If you have nothing worth carrying, say so plainly in one sentence.
+
+`watch_metric` is the event count whose movement would later tell you whether
+you were right. It must be something that counts things people did. Use "none"
+rather than reaching.
+
+`worth_telling_founder` is a veto, not a send button. Saying true does not send
+anything — it only permits it, and a dozen other conditions still have to hold.
+Default to false. Say true only when a founder who is busy, who did not ask, and
+who has not opened Discord in weeks would be glad you interrupted. Something you
+noticed that changes what he should do this week clears that bar. An observation
+he could make himself by looking, or a restatement of a report he already got,
+does not.
+
+`to_founder` is at most three sentences, plain, no headers, and only written
+when the veto is lifted.
+
+**Every number in `to_founder` must be one you were given.** Not just claims
+about the server — targets too. "Get five to ten conversations" and "spend 90
+minutes" are numbers you made up, and they are refused by the same check that
+refuses an invented member count, because from the outside the two are
+indistinguishable. Say "a handful of conversations" and "an afternoon" instead.
+Nothing is lost: the advice is the same, and a founder who wants the figures can
+read them himself. This is the most common reason a good thought never gets
+sent, so write the sentence without arithmetic in it from the start.
+"""

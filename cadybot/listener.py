@@ -15,6 +15,7 @@ Message content is never written to logs, only IDs and counts.
 import asyncio
 import json
 import traceback
+from datetime import datetime, timedelta, timezone
 from datetime import time as dtime
 from typing import Dict, Optional
 
@@ -22,7 +23,10 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from . import advisor, backfill, config, db, llm, loop, notify, room, snapshot
+from . import (
+    advisor, agenda, backfill, config, db, ledger, llm, loop, notify, room,
+    snapshot, thinking,
+)
 
 INTENTS = discord.Intents.none()
 INTENTS.guilds = True
@@ -99,12 +103,14 @@ class Cadybot(discord.Client):
         # heartbeat the health check reads. Only the two reporting passes are
         # handed to cron.
         if config.SCHEDULER == "cron":
-            print("scheduler: cron (weekly/nightly run via `cadybot post`)")
+            print("scheduler: cron (weekly/nightly/think run via `cadybot post`/`think`)")
         else:
             if not self.weekly_brief.is_running():
                 self.weekly_brief.start()
             if not self.daily_alerts.is_running():
                 self.daily_alerts.start()
+            if not self.think_pass.is_running():
+                self.think_pass.start()
         if not self.hourly_facts.is_running():
             self.hourly_facts.start()
 
@@ -432,6 +438,13 @@ class Cadybot(discord.Client):
                     )
                 if reply:
                     await notify.send(message.channel, reply)
+                    # A conversational reply is cadybot speaking, and the desk's
+                    # "do not talk over anything else" gap is measured off this
+                    # table. Without it the founder can be mid-conversation and
+                    # still get an unsolicited thought dropped on top of it,
+                    # because notify.send is a second door that notify.deliver's
+                    # logging never covered.
+                    db.record_delivery(message.guild.id, "chat", len(reply))
             except (advisor.Refused, advisor.BackendError) as exc:
                 await notify.send(message.channel, str(exc))
             except Exception:
@@ -512,7 +525,9 @@ class Cadybot(discord.Client):
                             % (q["author"], q["channel"], q["asked_days_ago"],
                                q["text"][:180], q["link"])
                         )
-                    await notify.deliver(self, guild.id, "\n\n".join(lines))
+                    await notify.deliver(
+                        self, guild.id, "\n\n".join(lines), "unanswered"
+                    )
             except Exception:
                 traceback.print_exc()
 
@@ -538,10 +553,54 @@ class Cadybot(discord.Client):
                 print("hourly refresh failed for %s: %s" % (guild.id, exc))
             except Exception:
                 traceback.print_exc()
+            # Its own try, for the reason daily_alerts splits its two: a Discord
+            # failure above must not stop the ledger, which touches no network
+            # at all. This runs here rather than in a loop of its own because
+            # hourly_facts is the one pass that starts under both scheduler
+            # modes, so the ledger has exactly one writer on every deployment.
+            try:
+                ledger.record_day(guild.id, snapshot.build(guild.id))
+                ledger.prune(guild.id)
+            except Exception:
+                traceback.print_exc()
+
+    @tasks.loop(hours=config.THINK_INTERVAL_HOURS)
+    async def think_pass(self) -> None:
+        """The desk. Wakes on a timer, thinks only when something happened.
+
+        The timer is not the trigger. `agenda.next_provocation` returns None
+        unless a row appeared in the database that cadybot has not already
+        thought about, so the common outcome here is a handful of indexed
+        SELECTs and nothing else — no model call, no message, no cost. On a
+        server where nobody is talking that is every tick, indefinitely, which
+        is the correct behaviour rather than a degenerate one.
+
+        Like the two reporting loops, it skips guilds with no private channel:
+        there is nowhere to say anything, and thinking about a server the
+        founder has not set up yet is work nobody asked for.
+        """
+        for guild in list(self.guilds):
+            if not self._rooms.get(guild.id):
+                continue
+            try:
+                await thinking.think(self, guild.id)
+            except Exception:
+                traceback.print_exc()
 
     @weekly_brief.before_loop
     async def _wait_weekly(self) -> None:
         await self.wait_until_ready()
+
+    @think_pass.before_loop
+    async def _wait_think(self) -> None:
+        await self.wait_until_ready()
+        # discord.ext.tasks sleeps *after* the body on a relative interval, so
+        # an interval loop runs once the moment it starts. With Restart=always
+        # and RestartSec=10 a crash loop would therefore attempt a pass every
+        # ten seconds, on the tick most likely to find a cold backend. The
+        # daily ceiling bounds the damage; this stops it happening at all, and
+        # costs a minute of latency on a pass that runs four times a day.
+        await asyncio.sleep(config.THINK_START_DELAY_SECONDS)
 
     @daily_alerts.before_loop
     async def _wait_daily(self) -> None:
@@ -550,6 +609,28 @@ class Cadybot(discord.Client):
     @hourly_facts.before_loop
     async def _wait_hourly(self) -> None:
         await self.wait_until_ready()
+
+
+def _why_quiet(row) -> str:
+    """One phrase saying what happened to a thought, and why it was not said.
+
+    Silence has several causes now — nothing provoked it, the model declined, a
+    figure did not check out, the clock was wrong, the backend may not speak —
+    and a founder who cannot tell them apart learns to read all of them as a
+    bug.
+    """
+    if row["outcome"] == "failed":
+        return "failed: %s" % (row["failure"] or "unknown")
+    if row["surfaced_at"]:
+        return "told you"
+    unverified = (row["unverified"] or "").strip()
+    if unverified not in ("", "[]"):
+        return "held back — I could not check %s" % unverified
+    if not row["wanted_telling"]:
+        return "not worth telling you"
+    if config.BACKEND not in config.THINK_SURFACE_BACKENDS:
+        return "written, but I do not volunteer on the local model"
+    return "written, waiting for a good moment"
 
 
 def _audit_extra(entry) -> Optional[str]:
@@ -753,6 +834,80 @@ def register_commands(bot: Cadybot) -> None:
             return
         n = db.clear_turns(interaction.guild_id, interaction.channel_id)
         await _reply(interaction, "Forgot %d turns. Starting fresh." % n, True)
+
+    @tree.command(name="notes", description="What cadybot thought about on its own")
+    @app_commands.guild_only()
+    async def notes(interaction: discord.Interaction) -> None:
+        """Everything the desk thought, including what it chose not to say.
+
+        The point of showing the unsaid ones is that silence stops being
+        ambiguous. Without this, a founder cannot tell "nothing happened" from
+        "something broke", and learns to read quiet as a bug.
+        """
+        await interaction.response.defer(ephemeral=True)
+        if not bot.may_read(interaction):
+            await _reply(interaction, NO_ROOM, True)
+            return
+        rows = agenda.recent(interaction.guild_id, limit=8)
+        if not rows:
+            state = thinking.preview(interaction.guild_id)
+            await _reply(
+                interaction,
+                "Nothing yet. cadybot only thinks when something happens in the "
+                "server — right now: _%s_." % state["why"],
+                True,
+            )
+            return
+        lines = ["**What I have been thinking about**", ""]
+        for row in rows:
+            when = row["started_at"][:10]
+            lines.append("`%s` **%s**%s — %s" % (
+                when, row["kind"],
+                " (%s)" % row["about_ref"] if row["about_ref"] else "",
+                _why_quiet(row),
+            ))
+            # The sentence it composed, whether or not it was allowed to say it.
+            # Showing only note_to_self meant the two things this command exists
+            # for — what it wanted to tell you, and why it did not — were the
+            # two things it did not show.
+            if row["to_founder"]:
+                lines.append("> %s" % row["to_founder"])
+            elif row["note_to_self"]:
+                lines.append("> _(to myself)_ %s" % row["note_to_self"])
+            lines.append("")
+        lines.append("_`/quiet 7` stops me volunteering anything for a week._")
+        await _reply(interaction, "\n".join(lines), True)
+
+    @tree.command(name="quiet", description="Stop cadybot volunteering thoughts for a while")
+    @app_commands.describe(days="How many days of quiet. 0 to turn it back on.")
+    @app_commands.guild_only()
+    async def quiet(interaction: discord.Interaction, days: int = 7) -> None:
+        """Silences speaking, never thinking.
+
+        The journal keeps filling and `/notes` keeps showing it, so turning the
+        volume down does not cost the record. Stopping the thinking entirely is
+        CADYBOT_THINK_CALLS_PER_DAY=0, which is an operator decision rather than
+        a chat one.
+        """
+        await interaction.response.defer(ephemeral=True)
+        if not bot.may_read(interaction):
+            await _reply(interaction, NO_ROOM, True)
+            return
+        days = max(0, min(days, 365))
+        if not days:
+            db.set_setting(interaction.guild_id, agenda.QUIET_KEY, None)
+            await _reply(interaction, "I'll speak up again when something happens.", True)
+            return
+        until = db.iso(
+            datetime.now(timezone.utc) + timedelta(days=days)
+        )
+        db.set_setting(interaction.guild_id, agenda.QUIET_KEY, until)
+        await _reply(
+            interaction,
+            "Quiet for %d day(s). I'll keep thinking and keep the notes — "
+            "`/notes` shows them, and `/quiet 0` turns me back on." % days,
+            True,
+        )
 
     @tree.error
     async def on_error(interaction: discord.Interaction, error: Exception) -> None:

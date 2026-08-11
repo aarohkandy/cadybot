@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Literal, Optional, Set
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
-from . import config, db, llm, prompts, scorecard, snapshot
+from . import agenda, config, db, llm, prompts, scorecard, snapshot
 
 # Re-exported so callers catch one name regardless of backend.
 Refused = llm.Refused
@@ -40,6 +40,24 @@ BackendError = llm.BackendError
 # than discovered at grading time, when the only remaining options are to guess
 # or to drop the row.
 METRIC_CHOICES: List[str] = list(snapshot.SCOREABLE_METRICS) + ["none"]
+
+# The narrower set a reflection may name. Event counts only: everything in
+# NON_COUNT_METRICS is a share, an age, a stock or a bounded index, and the
+# member that matters is activity.days_since_owner_posted, which rises by 1.0
+# every day precisely because nobody posts. A thought that says "watch this"
+# about a clock schedules itself forever and learns nothing each time.
+COUNT_METRIC_CHOICES: List[str] = [
+    m for m in snapshot.SCOREABLE_METRICS if m not in scorecard.NON_COUNT_METRICS
+] + ["none"]
+
+# Quantities spelled out in words, for Reflection.note_to_self. "one" and "a"
+# are absent on purpose: "one member asked a question" and "a third of the
+# server" differ, and refusing the first would reject most honest sentences.
+_SPELLED_NUMBER = (
+    r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|"
+    r"dozen|couple|half|third|quarter|percent|per cent)\b"
+)
 
 
 class Verdict(BaseModel):
@@ -182,6 +200,88 @@ class Brief(BaseModel):
         return self
 
 
+class Reflection(BaseModel):
+    """One thought, prompted by something that happened rather than by a person.
+
+    Same field-order law as everything else here: working first, conclusions
+    last. `to_founder` is the very last thing generated, after the model has
+    already committed to whether there is anything worth saying.
+    """
+
+    restated: str = Field(
+        description="The thing that happened, restated as a neutral question in "
+        "your own words. Nobody asked you this; say what you are actually asking."
+    )
+    reasoning: str = Field(description="Your working. Nobody reads this but you.")
+    evidence: str = Field(
+        description="The number from the snapshot, or from the facts above, that "
+        "this rests on. If there isn't one, say that instead of finding one."
+    )
+    note_to_self: str = Field(
+        description="At most two sentences, carried into a later brief and read "
+        "cold, by you, with no memory of today. No numbers."
+    )
+    watch_metric: str = Field(
+        description="The event count whose movement would tell you whether you "
+        "were right, or 'none'.",
+        json_schema_extra={"enum": COUNT_METRIC_CHOICES},
+    )
+    worth_telling_founder: bool = Field(
+        description="A veto, not a send button. False is the normal answer."
+    )
+    to_founder: Optional[str] = Field(
+        default=None,
+        description="At most three sentences, plain. Only if worth_telling_founder.",
+    )
+
+    # Set after generation, never by the model, and excluded from the schema.
+    _unverified: List[str] = PrivateAttr(default_factory=list)
+
+    @field_validator("watch_metric")
+    def _known_metric(cls, value: str) -> str:
+        """The enum above is enforced by Ollama's grammar. Anthropic needs this."""
+        if value not in COUNT_METRIC_CHOICES:
+            raise ValueError(
+                "%r is not an event count. Choose one of: %s"
+                % (value, ", ".join(COUNT_METRIC_CHOICES))
+            )
+        return value
+
+    @field_validator("note_to_self")
+    def _no_quantities(cls, value: str) -> str:
+        """A note is prompt input for the next two months. Quantities rot.
+
+        verify_evidence would catch a number that was invented today, but the
+        likelier failure is one that was *true* today and false in October —
+        "activity fell to 4 a week" passes every other check on the day it is
+        written and is a lie by the time it is read back. Nothing quantitative
+        needs to be carried, because the snapshot is right there when the note
+        is read.
+
+        Digits are the easy half. A digit filter alone lets through "activity
+        fell to four a week and joins to two", which is the identical failure
+        spelled out, so the cardinals and the common fraction words are refused
+        too. This is a word list and word lists are never complete — "a handful"
+        gets through — but it moves the leak from *the obvious phrasing* to an
+        unusual one, and what does get through is bounded by two sentences and
+        sixty days.
+        """
+        if re.search(r"\d", value):
+            raise ValueError(
+                "note_to_self must be qualitative — no numbers. A number written "
+                "down today is wrong in a month, and this is read in a month."
+            )
+        spelled = re.search(_SPELLED_NUMBER, value, re.IGNORECASE)
+        if spelled:
+            raise ValueError(
+                "note_to_self must be qualitative, and %r is a quantity written "
+                "out in words. Say what changed, not how much — the number will "
+                "be in the snapshot when you read this back."
+                % spelled.group(0)
+            )
+        return value
+
+
 # --- prompt assembly -------------------------------------------------------
 
 # One-step reframing. UK AISI (arXiv:2602.23971) measured sycophancy beta at
@@ -289,7 +389,12 @@ _SELF_ASSESSMENT = re.compile(
     r"|\bthe (last|previous|earlier|prior) (recommendation|advice|suggestion)s?\b"
     r"|\bas (i|we) (recommended|suggested|advised|predicted)\b"
     r"|\b(i|we) (recommended|suggested|advised|predicted|told you)\b"
-    r"|\b(advice|recommendation)s? (i|we) gave\b",
+    r"|\b(advice|recommendation)s? (i|we) gave\b"
+    # A reflection is invited to talk about its own past output, so it reaches
+    # for these two shapes in a way a brief never did.
+    r"|\b(my|our|the) (earlier|previous|prior|last) "
+    r"(note|question|reflection|reading|thought)s?\b"
+    r"|\b(i|we) (was|were) (right|wrong) (about|to)\b",
     re.IGNORECASE,
 )
 
@@ -367,11 +472,84 @@ def _numeric_literals(snap: Dict[str, Any]) -> Set[str]:
     return found
 
 
+# How a model refers to a channel: "#general", "the 'general' channel", or
+# "in the general channel". Members get quoted or @-prefixed.
+_CHANNEL_REF = re.compile(
+    r"#([A-Za-z0-9_-]{2,})"
+    r"|['\u2018\u2019\"\u201c\u201d]([A-Za-z0-9_ -]{2,32})['\u2018\u2019\"\u201c\u201d]\s+channel"
+    r"|\bthe\s+([A-Za-z0-9_-]{2,32})\s+channel\b"
+)
+
+
+def _known_names(snap: Dict[str, Any]) -> Set[str]:
+    """Every channel and person the snapshot actually names.
+
+    Collected from the whole tree rather than from a fixed list of keys, because
+    names appear in channels, dead_channels, top_posters_30d, never_posted,
+    gone_quiet, unanswered_questions and reply_dyads_30d, and a new block would
+    otherwise silently start producing false positives.
+    """
+    found: Set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("channel", "author", "name", "member", "display_name") and isinstance(value, str):
+                    found.add(value.strip().lower())
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                if isinstance(value, str):
+                    found.add(value.strip().lower())
+                else:
+                    walk(value)
+
+    walk(snap)
+    return found
+
+
+def verify_entities(snap: Dict[str, Any], text: Optional[str]) -> List[str]:
+    """Channel names cited in `text` that the snapshot does not contain.
+
+    verify_evidence catches an invented number and nothing else, so "post in the
+    #introductions channel" — on a server whose only channel is #hermes — passed
+    every check cadybot had. A small model is more prone to this than to
+    inventing a statistic, because a plausible channel name is exactly the kind
+    of detail it will fill in from the shape of the sentence.
+
+    Reported the same way numbers are: advisory everywhere except an unprompted
+    message, which is held to a higher bar because nobody asked for it.
+    """
+    if not text:
+        return []
+    known = _known_names(snap)
+    missing: List[str] = []
+    for match in _CHANNEL_REF.finditer(text):
+        name = next((g for g in match.groups() if g), "").strip().lower()
+        if not name or name in known or name in missing:
+            continue
+        missing.append(name)
+    return missing
+
+
 def _normalise(token: str) -> str:
     token = token.lstrip("+")
     if "." in token:
         token = token.rstrip("0").rstrip(".")
     return token or "0"
+
+
+# What counts as a number the model *cited*, as opposed to a digit that happens
+# to sit inside a word. `_NUMERAL` is deliberately greedy when mining the
+# snapshot — more known tokens can only reduce false positives — but running the
+# same pattern over prose reads "3" out of "r/3Dprinting", "4" out of "Q4" and
+# "-1" out of "R-1".
+#
+# That is not hypothetical. On the first real local run the desk produced sound
+# advice — go participate in r/3Dprinting rather than over-read one message —
+# and suppressed it, because "3" appears in no snapshot. The single most likely
+# phrase this founder's advisor could ever use silenced it permanently.
+_CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z])")
 
 
 def verify_evidence(snap: Dict[str, Any], text: str) -> List[str]:
@@ -387,7 +565,7 @@ def verify_evidence(snap: Dict[str, Any], text: str) -> List[str]:
         return []
     known = _numeric_literals(snap)
     missing: List[str] = []
-    for token in _NUMERAL.findall(text):
+    for token in _CITED_NUMERAL.findall(text):
         normalised = _normalise(token)
         if normalised not in known and normalised not in missing:
             missing.append(normalised)
@@ -450,13 +628,20 @@ def brief(
         verdicts = scorecard.recent_verdicts(guild_id, limit=4)
     verdicts = verdicts or []
 
+    # The verdict block and the desk's own notes ride together in `extra`. Notes
+    # go last so the block the founder's outcome is judged against is the one
+    # nearest the instruction.
+    extra = "\n\n".join(
+        p for p in (_given_verdicts(verdicts, open_row), _notes_block(guild_id)) if p
+    ) or None
+
     result = llm.generate(
         prompts.stable_prefix(),
         _turn(
             prompts.BRIEF_INSTRUCTION + "\n\n" + BRIEF_SCHEMA_NOTE,
             snap,
             None,
-            _given_verdicts(verdicts, open_row),
+            extra,
         ),
         Brief,
         "brief",
@@ -547,6 +732,84 @@ def chat(
     db.add_turn(guild_id, channel_id, "user", message, speaker)
     db.add_turn(guild_id, channel_id, "assistant", reply)
     return reply
+
+
+def _notes_block(guild_id: Optional[int]) -> Optional[str]:
+    """What cadybot noticed between reports, handed to the next brief.
+
+    This is the only channel by which thinking done unprompted reaches anything
+    the founder sees, and it is the one place the "the model never sees what it
+    produced" property is softened. The header is doing real work: these are
+    labelled as the model's own notes, not as facts, and the schema forbids them
+    from containing a number, so the worst a stale note can do is be wrong in
+    prose next to a snapshot that is right in figures.
+    """
+    if not guild_id:
+        return None
+    notes = agenda.live_notes(guild_id)
+    if not notes:
+        return None
+    return "\n".join(
+        [
+            "# Your own notes since the last brief",
+            "",
+            "You wrote these to yourself when something happened. They are not "
+            "facts and they are not numbers — the snapshot above is the only "
+            "thing that counts. No verdict on past advice is yours to give.",
+            "",
+        ]
+        + ["- %s" % n for n in notes]
+    )
+
+
+def reflect(
+    prov: Any,
+    snap: Dict[str, Any],
+    guild_id: Optional[int] = None,
+    backend: Optional[str] = None,
+) -> Reflection:
+    """Answer a question cadybot put to itself.
+
+    `prov` is an agenda.Provocation. Its `self_prompt` was composed by code from
+    stored rows — no model-authored text is ever stored as a question, because a
+    question is durable prompt input and a number invented inside one becomes a
+    fact cadybot believes for as long as it survives.
+
+    Note what is *not* here: no verdict field, no way to re-grade a past row, and
+    no argument selecting a different backend to narrate with. All three were
+    available and all three are the shapes that went wrong before.
+    """
+    result = llm.generate(
+        prompts.stable_prefix(),
+        _turn(prompts.REFLECT_INSTRUCTION, snap, None, prov.self_prompt),
+        Reflection,
+        "reflect",
+        guild_id or config.GUILD_ID,
+        backend=backend,
+    )
+    # Only the two fields that survive this call get cleaned. `reasoning` is
+    # neither shown to anyone nor replayed, so rewriting it would be editing a
+    # private note for an audience that does not exist.
+    result.to_founder = _drop_self_assessment(result.to_founder)
+    # No `or result.note_to_self` fallback here. _drop_self_assessment returns
+    # None when every sentence was self-assessment, and elsewhere the original
+    # is restored because the field is load-bearing. This field is not: the
+    # verdict provocation asks the model what it got wrong, so a note that is
+    # *entirely* self-grading is the expected answer — and restoring it would
+    # feed exactly the thing the guard exists to strip into the next sixty days
+    # of briefs. An empty note is the correct outcome.
+    result.note_to_self = _drop_self_assessment(result.note_to_self) or ""
+    # Figures the provocation itself supplied are not inventions: cadybot handed
+    # the model "threshold 1, reading 0" and must not then flag it for saying so.
+    # Numbers and names, together. A small model invents a plausible channel far
+    # more readily than it invents a statistic — "post in #introductions" on a
+    # server whose only channel is #hermes — and until verify_entities existed
+    # nothing looked at that at all.
+    result._unverified = sorted(
+        (set(verify_evidence(snap, result.to_founder)) - agenda.known_numbers(prov))
+        | set("#" + name for name in verify_entities(snap, result.to_founder))
+    )
+    return result
 
 
 # --- rendering -------------------------------------------------------------
@@ -686,3 +949,50 @@ def render_brief(b: Brief) -> str:
         ]
     lines += ["_%s_" % llm.describe(b._backend)]
     return "\n".join(lines).strip()
+
+
+def render_reflection(r: Reflection, prov: Any) -> str:
+    """A volunteered thought. Deliberately unlike a brief.
+
+    No headline, no ranking, no watch line, no pre-registered bet — this is
+    cadybot saying one thing it noticed, and it has to look like that rather
+    than like a report the founder forgot he scheduled. The provenance line says
+    what set it off, so an unprompted message never arrives without a reason
+    attached.
+    """
+    lines = ["**A thought.**", "", (r.to_founder or "").strip(), ""]
+    because = {
+        "verdict": "a recommendation closed",
+        "life": "somebody posted after a silent month",
+        "joined": "somebody joined after a quiet fortnight",
+        "drift": "a count moved over the last fortnight",
+    }.get(prov.kind, prov.kind)
+    trail = "_Prompted by %s" % because
+    if prov.about_ref:
+        trail += " (%s)" % prov.about_ref
+    lines.append(trail + ". Nobody asked me; `/quiet 7` stops this._")
+    if r._unverified:
+        lines.append(
+            "_Unverified numbers: %s — not found in the snapshot._"
+            % ", ".join(r._unverified)
+        )
+    return "\n".join(lines).strip()
+
+
+def render_stored(row: Any) -> str:
+    """Re-render a thought that was written earlier and held for a quiet moment.
+
+    The desk composes a sentence when something happens, but it may only speak
+    inside a narrow window, so the two are usually different ticks. This puts
+    the stored row back into the same shape render_reflection produces, without
+    a second model call — the sentence was written and checked once.
+    """
+    stub = type("_Held", (), {"kind": row["kind"], "about_ref": row["about_ref"]})()
+    held = Reflection(
+        restated="", reasoning="", evidence="",
+        note_to_self=row["note_to_self"] or "held",
+        watch_metric=row["watch_metric"] or "none",
+        worth_telling_founder=True,
+        to_founder=row["to_founder"],
+    )
+    return render_reflection(held, stub)

@@ -111,6 +111,57 @@ RECOMMENDATION_HORIZON_DAYS = 14
 SPEAK_THRESHOLD_MESSAGES = 10
 
 
+# --- the desk: thinking without being asked --------------------------------
+#
+# cadybot wakes on a timer, but it only *thinks* when something happened — see
+# agenda.py. These numbers bound what happens when something does.
+
+# How often the desk checks whether anything has happened. Cheap: the common
+# outcome is a handful of indexed SELECTs that find nothing and return.
+THINK_INTERVAL_HOURS = 6
+
+# discord.ext.tasks runs an interval loop once immediately on start, so with
+# Restart=always a crash loop would attempt a pass every ten seconds — on the
+# tick most likely to find the backend still coming up.
+THINK_START_DELAY_SECONDS = 60
+
+# Hard ceiling on thoughts per guild per rolling day. Counted from journal rows
+# written *before* the call, so a failure is charged like a success — the calls
+# that time out are the expensive ones. Set to 0 to stop thinking entirely
+# without touching code.
+THINK_CALLS_PER_DAY = _int("CADYBOT_THINK_CALLS_PER_DAY", 2)
+
+# Backends allowed to speak unprompted. Thinking happens on any backend and the
+# journal fills either way; this only controls initiating.
+#
+# The default is the API model, because an unprompted message is the one place
+# with no founder question to anchor against and llm.py calls the local path
+# noticeably worse at judgment. But it is a setting rather than a rule: the
+# local model is what actually runs here, and a desk that can never speak is not
+# a desk. Set CADYBOT_THINK_SURFACE_BACKENDS=ollama,anthropic to let it talk on
+# local inference — the evidence gates in thinking.py apply either way, and they
+# are stricter for an unprompted message than for an answer that was asked for.
+THINK_SURFACE_BACKENDS = tuple(
+    b.strip().lower()
+    for b in (os.getenv("CADYBOT_THINK_SURFACE_BACKENDS") or "anthropic").split(",")
+    if b.strip()
+)
+
+# At most one volunteered thought a week, never within 20h of anything else
+# cadybot said, and only in the afternoon UTC window the weekly brief already
+# uses. The gap is measured against every kind of delivery, so the nightly, the
+# weekly, the unanswered-question alert and the desk finally know about each
+# other.
+SURFACE_MAX_PER_WEEK = 1
+SURFACE_MIN_GAP_HOURS = 20
+SURFACE_WINDOW_UTC = (14, 20)
+
+# A note cadybot leaves itself rides into a later brief. Both numbers exist so
+# carried context cannot grow with uptime.
+NOTE_TTL_DAYS = 60
+NOTES_CARRIED = 3
+
+
 def require_discord() -> None:
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
