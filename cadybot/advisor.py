@@ -27,9 +27,11 @@ import json
 import re
 from typing import Any, Dict, List, Literal, Optional, Set
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel, Field, PrivateAttr, create_model, field_validator, model_validator,
+)
 
-from . import agenda, config, db, llm, prompts, scorecard, snapshot
+from . import agenda, config, db, llm, plays, prompts, scorecard, snapshot
 
 # Re-exported so callers catch one name regardless of backend.
 Refused = llm.Refused
@@ -97,6 +99,13 @@ class Recommendation(BaseModel):
     )
     play_fails_when: str = Field(
         description="The condition under which this play backfires."
+    )
+    play: str = Field(
+        default="none",
+        description="Which play from the catalogue this is. The list you are "
+        "given is computed from the snapshot: a play whose precondition does "
+        "not hold, or which the founder has already done, is not in it. Use "
+        "'none' when nothing fits.",
     )
     headline: str = Field(description="The imperative, one line.")
     action: str = Field(
@@ -632,7 +641,11 @@ def brief(
     # go last so the block the founder's outcome is judged against is the one
     # nearest the instruction.
     extra = "\n\n".join(
-        p for p in (_given_verdicts(verdicts, open_row), _notes_block(guild_id)) if p
+        p for p in (
+            plays.render(snap),
+            _given_verdicts(verdicts, open_row),
+            _notes_block(guild_id),
+        ) if p
     ) or None
 
     result = llm.generate(
@@ -643,7 +656,7 @@ def brief(
             None,
             extra,
         ),
-        Brief,
+        _brief_model_for(snap),
         "brief",
         guild_id,
         backend=backend,
@@ -732,6 +745,55 @@ def chat(
     db.add_turn(guild_id, channel_id, "user", message, speaker)
     db.add_turn(guild_id, channel_id, "assistant", reply)
     return reply
+
+
+def _brief_model_for(snap: Dict[str, Any]):
+    """A Brief whose `play` field only accepts plays that are actually eligible.
+
+    The enum is computed from the snapshot by plays.py and injected per request,
+    which is the same mechanism that already makes an invented metric name
+    undecodable: ollama compiles the JSON Schema to a grammar, so an ineligible
+    play cannot be emitted at all rather than merely being discouraged in prose.
+
+    This exists because prose preconditions do not hold. The catalogue says
+    "Merge channels down — if more than about three channels exist", the live
+    server has one channel already named hermes, and the model recommended
+    merging down to one channel named hermes. Eligible, satisfied and stage are
+    arithmetic now.
+    """
+    allowed = plays.choices(snap)
+
+    @field_validator("play")
+    def _known_play(cls, value: str) -> str:
+        # The enum is enforced by ollama's grammar. The Anthropic path needs this.
+        if value not in allowed:
+            raise ValueError(
+                "%r is not available for this server right now. Choose one of: %s"
+                % (value, ", ".join(allowed))
+            )
+        return value
+
+    rec = create_model(
+        "EligibleRecommendation",
+        __base__=Recommendation,
+        __validators__={"_known_play": _known_play},
+        # Required, with no default. A defaulted field is one the decoder may
+        # skip, and it did: the first run returned play="none" on a
+        # recommendation whose own headline was "Show a failure: ...". Naming
+        # the play is how the recommendation becomes checkable at all.
+        play=(
+            str,
+            Field(
+                description=Recommendation.model_fields["play"].description,
+                json_schema_extra={"enum": allowed},
+            ),
+        ),
+    )
+    return create_model(
+        "EligibleBrief",
+        __base__=Brief,
+        recommendations=(List[rec], Field(default_factory=list, max_length=3)),
+    )
 
 
 def _notes_block(guild_id: Optional[int]) -> Optional[str]:

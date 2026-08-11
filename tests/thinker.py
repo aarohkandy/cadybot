@@ -898,6 +898,69 @@ check("54b and the default still refuses", not _ok2 and "may think" in _why2, _w
 config.THINK_SURFACE_BACKENDS = _before
 config.SURFACE_WINDOW_UTC = _win
 
+# ------------------------------------------- plays: preconditions as arithmetic
+#
+# Observed on the live server: cadybot advised "immediately merge down all
+# channels, leaving only one channel named `hermes`" on a server that has
+# exactly one channel, already named hermes. The play's stated precondition is
+# "more than about three channels exist" — prose, which the model walked
+# straight through. These pin both halves: ineligible, and already done.
+
+from cadybot import plays  # noqa: E402
+
+LIVE = {
+    "stage": "seed",
+    "channels": {"count": 1, "all": [{"channel": "hermes"}]},
+    "dead_channels": {"count": 1, "all": ["hermes"]},
+    "unanswered_questions": [],
+    "members": {"humans": 1, "never_posted": {"count": 0}, "gone_quiet": {"count": 1}},
+    "activity": {"messages_30d": 0, "days_since_owner_posted": 88.7},
+}
+_eligible = [p.id for p in plays.eligible(LIVE)]
+check("55 the play that produced the bad advice is not offered",
+      "merge_channels" not in _eligible, _eligible)
+check("55b and it is withheld as already done, not merely ineligible",
+      plays.BY_ID["merge_channels"].status(LIVE) == "already true",
+      plays.BY_ID["merge_channels"].status(LIVE))
+check("55c answering an unanswered question is withheld when there are none",
+      "answer_unanswered" not in _eligible)
+check("55d but the plays that do fit are offered",
+      {"post_the_work", "do_nothing_to_the_server"} <= set(_eligible), _eligible)
+
+FOUR_DEAD = dict(LIVE, channels={"count": 5}, dead_channels={"count": 4})
+check("56 with five channels and four dead, merging is offered",
+      "merge_channels" in [p.id for p in plays.eligible(FOUR_DEAD)])
+
+check("57 stage gates the catalogue",
+      all("engagement_mechanics" != p.id for p in plays.eligible(LIVE))
+      and "engagement_mechanics" in [p.id for p in plays.for_stage("growing")])
+
+check("58 'none' is always choosable", "none" in plays.choices(LIVE))
+check("58b the enum is exactly the eligible set plus none",
+      plays.choices(LIVE) == _eligible + ["none"])
+
+_M = advisor._brief_model_for(LIVE)
+_base = dict(evidence="e", reasoning="r", would_change_my_mind="w", play_fails_when="f",
+             headline="h", action="a", metric="none", direction="unchanged",
+             horizon_days=7, guardrail_metric="none")
+try:
+    _M(recommendations=[dict(_base, play="merge_channels")], headline="x")
+    _ok59 = False
+except ValidationError:
+    _ok59 = True
+check("59 an ineligible play cannot be decoded at all", _ok59)
+check("59b an eligible one can",
+      _M(recommendations=[dict(_base, play="post_the_work")], headline="x") is not None)
+_props = list(_M.model_json_schema()["$defs"]["EligibleRecommendation"]["properties"])
+check("59c play is committed to before the free text is written",
+      _props.index("play") < _props.index("action"), _props)
+check("59d and the enum reaches the schema the grammar is built from",
+      _M.model_json_schema()["$defs"]["EligibleRecommendation"]["properties"]["play"].get("enum")
+      == plays.choices(LIVE))
+
+check("60 plays.py stays model-free",
+      not (imports((ROOT / "cadybot" / "plays.py").read_text()) & {"advisor", "llm"}))
+
 # ------------------------------------------------------------------- report
 
 print()
