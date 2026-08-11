@@ -10,7 +10,7 @@ from typing import List, Optional
 
 import discord
 
-from . import config, room
+from . import config, db, room
 
 LIMIT = 1900  # Discord's cap is 2000; leave room for fence characters
 
@@ -61,11 +61,28 @@ async def send(destination, text: str) -> None:
         await destination.send(part)
 
 
-async def deliver(bot: discord.Client, guild_id: int, text: str) -> None:
+async def deliver(
+    bot: discord.Client,
+    guild_id: int,
+    text: str,
+    kind: str = "other",
+    journal_id: Optional[int] = None,
+) -> bool:
     """Post to that server's private channel; fall back to DMing its owner.
 
     Scoped to one server on purpose — a brief about the test server must never
     land in the live server's channel.
+
+    Returns whether anything was actually said, and records it in `deliveries`
+    when it was. Both exist for the same reason: the two paths below that give
+    up return silently, which is indistinguishable from a successful send to
+    every caller. Anything that wants to know how recently the founder was
+    interrupted — and there is now more than one such caller — cannot ask
+    Discord, so it has to be written down here. The write lives inside this
+    function rather than in its callers so a mouth added later is logged
+    because it came through this door, not because someone remembered.
+
+    No caller is required to check the bool.
     """
     guild = bot.get_guild(guild_id)
     if guild is not None:
@@ -73,11 +90,15 @@ async def deliver(bot: discord.Client, guild_id: int, text: str) -> None:
         channel = guild.get_channel(channel_id) if channel_id else None
         if channel is not None:
             await send(channel, text)
-            return
+            db.record_delivery(guild_id, kind, len(text), journal_id)
+            return True
 
     owner = room.owner_id(guild_id)
     if not owner:
-        return
+        return False
     user = bot.get_user(owner) or await bot.fetch_user(owner)
-    if user is not None:
-        await send(await user.create_dm(), text)
+    if user is None:
+        return False
+    await send(await user.create_dm(), text)
+    db.record_delivery(guild_id, kind, len(text), journal_id)
+    return True

@@ -233,6 +233,66 @@ CREATE TABLE IF NOT EXISTS audit_events (
     PRIMARY KEY (guild_id, entry_id)
 );
 CREATE INDEX IF NOT EXISTS ix_audit ON audit_events (guild_id, at);
+
+-- A daily close of each event-count metric: the first history of past readings
+-- this database has ever held. snapshot.build recomputes from the raw tables
+-- and discards, so "what did this number look like a fortnight ago" had no
+-- answer. Wall-clock ages and stock counts are deliberately absent — a metric
+-- that moves because time passed is a clock, and a detector watching one fires
+-- forever on a server where nothing is happening.
+CREATE TABLE IF NOT EXISTS ledger (
+    guild_id  INTEGER NOT NULL,
+    day       TEXT NOT NULL,         -- 'YYYY-MM-DD', UTC
+    metric    TEXT NOT NULL,         -- a ledger.LEDGER_METRICS path
+    value     REAL,
+    PRIMARY KEY (guild_id, day, metric)
+);
+
+-- One row per thought, written BEFORE the model call. That order makes the
+-- insert do four jobs at once: it charges the budget, advances the cursor,
+-- survives a crash mid-call, and locks against a second process. `provoked_by`
+-- is copied from a stored row, never generated, so two processes racing on the
+-- same event compute byte-identical values and the loser's INSERT loses to the
+-- UNIQUE constraint instead of duplicating the thought.
+CREATE TABLE IF NOT EXISTS journal (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id      INTEGER NOT NULL,
+    kind          TEXT NOT NULL,     -- verdict | life | joined | context | drift
+    provoked_by   TEXT NOT NULL,     -- a stored timestamp. NEVER db.now().
+    about_ref     TEXT,              -- 'R-14', or NULL
+    started_at    TEXT NOT NULL,
+    self_prompt   TEXT NOT NULL,     -- composed by code, stored verbatim
+    restated      TEXT,
+    reasoning     TEXT,
+    evidence      TEXT,
+    note_to_self  TEXT,
+    watch_metric  TEXT,
+    to_founder    TEXT,
+    unverified    TEXT,              -- JSON list, reported not enforced
+    outcome       TEXT NOT NULL DEFAULT 'started',   -- started | thought | failed
+    failure       TEXT,
+    wanted_telling INTEGER NOT NULL DEFAULT 0,        -- the model lifted its veto
+    attempts      INTEGER NOT NULL DEFAULT 1,         -- a timed-out backend gets one retry
+    surfaced_at   TEXT,
+    model         TEXT,
+    UNIQUE (guild_id, kind, provoked_by)
+);
+CREATE INDEX IF NOT EXISTS ix_journal ON journal (guild_id, started_at);
+
+-- What cadybot actually said, and when. Nothing recorded this before, so the
+-- nightly pass, the weekly brief and the unanswered-question alert had no way
+-- to know about each other: three mouths and no shared memory of having
+-- spoken. Anything that wants to reason about how often the founder is
+-- interrupted needs this table to exist first.
+CREATE TABLE IF NOT EXISTS deliveries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id    INTEGER NOT NULL,
+    at          TEXT NOT NULL,
+    kind        TEXT NOT NULL,       -- nightly | weekly | unanswered | thought | other
+    chars       INTEGER,
+    journal_id  INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_deliveries ON deliveries (guild_id, at);
 """
 
 # CREATE TABLE IF NOT EXISTS will not add a column to a table that already
@@ -754,6 +814,35 @@ def set_setting(guild_id: int, key: str, value: Optional[str]) -> None:
     )
 
 
+def record_delivery(
+    guild_id: int, kind: str, chars: int, journal_id: Optional[int] = None
+) -> None:
+    """Note that cadybot said something. Written by notify.deliver, nowhere else.
+
+    Putting the write inside `deliver` rather than in each caller is the same
+    move `notify._guard` makes: a new mouth is covered because it has to go
+    through the one door, not because whoever added it remembered to log.
+    """
+    connect().execute(
+        "INSERT INTO deliveries (guild_id, at, kind, chars, journal_id) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (guild_id, now(), kind, chars, journal_id),
+    )
+
+
+def deliveries_since(guild_id: int, since: str, kind: Optional[str] = None) -> int:
+    """How many times cadybot has spoken since `since`, optionally of one kind."""
+    if kind is None:
+        return scalar(
+            "SELECT COUNT(*) FROM deliveries WHERE guild_id=? AND at>=?",
+            (guild_id, since),
+        )
+    return scalar(
+        "SELECT COUNT(*) FROM deliveries WHERE guild_id=? AND at>=? AND kind=?",
+        (guild_id, since, kind),
+    )
+
+
 def purge_member(guild_id: int, user_id: int) -> int:
     """Delete everything about one member. Data-deletion requests land here."""
     conn = connect()
@@ -779,8 +868,8 @@ def purge_member(guild_id: int, user_id: int) -> int:
 GUILD_TABLES = (
     "messages", "mentions", "reactions", "member_events", "voice_sessions",
     "invite_uses", "recommendations", "runs", "conversation", "channels",
-    "members", "guild_facts", "presence_samples", "audit_events", "settings",
-    "guilds",
+    "members", "guild_facts", "presence_samples", "audit_events", "deliveries",
+    "ledger", "journal", "settings", "guilds",
 )
 
 

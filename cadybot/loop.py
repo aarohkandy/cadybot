@@ -113,9 +113,9 @@ def _scorecard_only(
     return "\n".join(lines).strip()
 
 
-async def _deliver(client, guild_id: int, text: str) -> str:
+async def _deliver(client, guild_id: int, text: str, kind: str = "other") -> str:
     if client is not None:
-        await notify.deliver(client, guild_id, text)
+        await notify.deliver(client, guild_id, text, kind)
     return text
 
 
@@ -174,13 +174,13 @@ async def nightly(client, guild_id: int) -> Optional[str]:
         # A verdict landed, or the slot is taken. Either way there is no new
         # advice to write, so there is nothing for a model to do.
         text = _scorecard_only(verdicts, open_row)
-        await _deliver(client, guild_id, text)
+        await _deliver(client, guild_id, text, "nightly")
         _remember(guild_id, snap)
         return text
 
     result = await _brief(client, snap, guild_id, verdicts)
     text = "**Nightly**\n\n" + advisor.render_brief(result)
-    await _deliver(client, guild_id, text)
+    await _deliver(client, guild_id, text, "nightly")
     # Both of these are claims that the founder has been told something, so
     # neither may run until they have been. _remember marks this movement as
     # reported, and it never fires again; register opens a bet that will be
@@ -201,13 +201,13 @@ async def weekly(client, guild_id: int) -> Optional[str]:
         # interventions cannot be separated even in principle, so a second one
         # would only give the next grading pass something to attribute freely.
         text = "**Weekly brief**\n\n" + _scorecard_only(verdicts, open_row)
-        await _deliver(client, guild_id, text)
+        await _deliver(client, guild_id, text, "weekly")
         _remember(guild_id, snap)
         return text
 
     result = await _brief(client, snap, guild_id, verdicts)
     text = "**Weekly brief**\n\n" + advisor.render_brief(result)
-    await _deliver(client, guild_id, text)
+    await _deliver(client, guild_id, text, "weekly")
     advisor.register(result, snap, guild_id)
     _remember(guild_id, snap)
     return text
