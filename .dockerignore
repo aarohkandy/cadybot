@@ -1,0 +1,11 @@
+# The live database lives outside the image and is mounted in. Anything
+# database-shaped in the build context is a stale artifact that would otherwise
+# ship inside the image — a 94 KB copy of a pre-migration database did exactly
+# that until 2026-08-11.
+*.db
+*.db-wal
+*.db-shm
+*.db.bak-*
+.git
+__pycache__/
+*.pyc

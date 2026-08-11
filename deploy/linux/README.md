@@ -110,3 +110,22 @@ sudo sqlite3 /opt/cadybot/cadybot.db ".backup '/tmp/cadybot-$(date +%F).db'"
 
 Use `.backup` rather than `cp` — the database runs in WAL mode, and a plain copy
 of a live WAL database can land mid-transaction.
+
+
+## The desk under cron
+
+With `CADYBOT_SCHEDULER=cron` the listener starts none of the reporting loops,
+including the desk. Add a fourth timer beside the nightly and weekly ones:
+
+```
+0 */6 * * *  cd /opt/cadybot && .venv/bin/python -m cadybot think --guild <id>
+```
+
+**Do not run this alongside `CADYBOT_SCHEDULER=internal`.** Two schedulers means
+two passes competing for the same daily budget. They cannot duplicate a thought
+— `journal`'s UNIQUE constraint sees to that — but they can spend the ceiling on
+each other and leave the real provocation unaffordable.
+
+`cadybot reflect --guild <id>` is the read-only version: it prints what the desk
+would think about and whether it would speak, without a model call or a row
+written. Safe to run as often as you like.

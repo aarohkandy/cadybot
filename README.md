@@ -8,7 +8,7 @@ it, tells you what to do, and later tells you honestly whether that worked.
 
 It posts in exactly one place: a private channel you create with `/private`.
 
-## The two rules everything else follows from
+## The three rules everything else follows from
 
 **1. The model never produces a number.** `snapshot.py` computes every metric in
 SQL; the model only interprets what it is handed. That is what stops it
@@ -21,6 +21,18 @@ produce and cannot revise.
 
 The second rule exists because the first one is not enough. A system that cannot
 hallucinate a statistic can still hallucinate that it has been helping.
+
+**3. cadybot thinks when something happens, and only then.** It wakes on a timer
+but the timer is not the trigger: `agenda.py` will only produce a question if a
+row appeared in the database — a verdict closed, someone posted, someone joined,
+a file was edited. The timestamp is always read from that row, never from the
+clock, and `tests/thinker.py` checks that for every generator. So on a server
+where nothing is happening, cadybot is quiet the way `grep` is quiet on an empty
+file — not because it decided to be.
+
+The third rule exists because the first two do not stop the failure that kills
+autonomous agents: a bot that wakes up with nothing to do and finds something
+anyway.
 
 ## What it does
 
@@ -37,6 +49,40 @@ hallucinate a statistic can still hallucinate that it has been helping.
 - **Grades itself.** Each recommendation pre-registers a metric, a direction, a
   horizon and a guardrail *before* you act. Later, the scorer says whether it
   worked, failed, was never attempted, or cannot be told apart from noise.
+- **Thinks between reports.** Four times a day it checks whether anything has
+  happened that it has not already thought about. Almost always nothing has, and
+  it costs nothing to find that out. When something has — a bet closed, the room
+  woke up after a silent month, someone joined after a fortnight of nobody — it
+  works out what it makes of that, writes itself a note, and usually keeps it.
+  `/notes` shows everything it thought, including what it decided not to say.
+
+## Thinking without being asked
+
+`/brief` and `/ask` are still the way to get an answer now. But cadybot no
+longer needs you to start the conversation.
+
+The rule that keeps this from becoming noise is that a *thought is caused by a
+row, not by a schedule.* Five things can cause one, and each reads its timestamp
+out of the database: a recommendation closing, the first message after a silent
+month, a join after a fortnight's drought, an edit to `context/`, or a count that
+moved over a fortnight **with a real event behind it** — decay as a 30-day window
+slides is arithmetic, not news.
+
+Speaking is a much narrower gate than thinking: at most one volunteered message
+a week, never within 20 hours of anything else cadybot said, only in the
+afternoon, never about a `context/` edit, never with a number that is not in the
+snapshot, and only when the model *also* agrees — a veto it can only use to stay
+quiet. Most of those are clocks, so a thought is usually written on one pass and
+said on another; it waits up to two days for a good moment rather than being
+thrown away, and no second model call is spent when its turn comes. On a seven-member server the honest expectation is a couple of thoughts a
+month and almost no messages, and that is the design working rather than failing.
+
+`/quiet 7` stops it volunteering anything for a week and keeps the thinking.
+`CADYBOT_THINK_CALLS_PER_DAY=0` stops the thinking too.
+
+Unprompted speech is also gated on the backend: on local inference cadybot
+thinks and journals but will not initiate. Deciding on its own to interrupt
+someone is the last thing that should run on the weaker model.
 
 It never moderates, never DMs members, and never posts outside its own channel.
 That last part is enforced in `notify._guard`, which rejects every destination
@@ -84,6 +130,8 @@ need to be able to see the private channel.
 /add /remove        change that
 /backfill           import this server's message history
 /reset              forget the conversation so far
+/notes              what cadybot thought about on its own, said or not
+/quiet <days>       stop it volunteering thoughts (0 turns it back on)
 ```
 
 Answers are visible in the private channel and ephemeral anywhere else, so
@@ -143,17 +191,25 @@ filled the window rather than trusting it.
 ```bash
 .venv/bin/python tests/harness.py            # 19 synthetic servers, no model
 .venv/bin/python tests/scorer.py             # 31 grading cases, no model
+.venv/bin/python tests/thinker.py            # 61 desk cases, no model
 .venv/bin/python tests/harness.py --advice    # runs the model, slow
 .venv/bin/python tests/conversation.py        # multi-turn dialogue, runs the model
 ```
 
-The first two are deterministic and fast — run them after any change. They cover
+The first three are deterministic and fast — run them after any change. They cover
 brand-new servers, raids, exoduses, all-bot servers, one power user carrying
 everything, 5,000 members, dead channels, moderation waves, and the difference
 between a fact that is false and a fact cadybot cannot read.
 
 The scorer suite is the one that matters most. It pins the cases where an
 earlier version marked its own advice `worked` while twenty people went silent.
+
+`tests/thinker.py` is the same idea for the desk. Its load-bearing cases are the
+ones that pin a bot which cannot stop talking: that every provocation's
+timestamp is strictly in the past, that a metric which moves because time passed
+can never be watched, that two counts drifting off one event produce one thought
+rather than two, and that a month of ticks on the live server produces exactly
+none.
 
 ## Data
 

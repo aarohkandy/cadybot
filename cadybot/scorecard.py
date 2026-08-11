@@ -33,6 +33,20 @@ Huang et al. (ICLR 2024) measured GPT-3.5 flipping 7.6% of its wrong GSM8K
 answers right and 8.8% of its right ones wrong when asked to reconsider without
 new information — a net loss. Every reflective step must be anchored to a number
 the model did not produce, which is what this file exists to supply.
+
+That rule was once absolute. Since agenda.py it is exact rather than absolute,
+and the difference is worth stating precisely: **no reflective step without a
+fact that did not exist when the claim was made, where "fact" means a row in the
+database.** agenda.next_provocation enforces it mechanically — a provocation's
+timestamp is read from stored data and asserted to be in the past, so a pass
+cannot reconsider anything merely because time went by. The reflection a closed
+verdict provokes is handed the verdict this file computed, in a schema with no
+field to revise it. That is Huang's oracle condition, not its absence.
+
+What remains forbidden, and is not weakened: nothing may re-grade a row, no
+model output may become a verdict, and no verdict may be revisited because a
+model thought better of it. `_recheck` reopens a `worked` row only on a later
+reading of the same pre-registered metric.
 """
 
 import json
