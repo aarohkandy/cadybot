@@ -722,7 +722,15 @@ def register_commands(bot: Cadybot) -> None:
         await interaction.response.defer(ephemeral=not visible)
         try:
             snap = snapshot.build(interaction.guild_id)
-            verdict = await asyncio.to_thread(advisor.ask, question, snap, interaction.guild_id)
+            # One lookup round before a verdict. The interaction is already
+            # deferred, so the 15-minute window absorbs it comfortably.
+            inq = await asyncio.to_thread(
+                inquiry.investigate, interaction.guild_id, question,
+                config.INQUIRY_ROUNDS_ASK, config.INQUIRY_BUDGET_ASK,
+            )
+            verdict = await asyncio.to_thread(
+                advisor.ask, question, snap, interaction.guild_id, None, inq
+            )
         except (advisor.Refused, advisor.BackendError) as exc:
             await _reply(interaction, str(exc), True)
             return

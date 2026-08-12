@@ -173,3 +173,8 @@ def require_discord() -> None:
 # of citable figures widens what it volunteers.
 INQUIRY_ROUNDS_CHAT = _int("CADYBOT_INQUIRY_ROUNDS", 2)
 INQUIRY_BUDGET_CHAT = _int("CADYBOT_INQUIRY_BUDGET", 150)
+
+# /ask gets one round: it is a verdict on a question the founder already framed,
+# not an open conversation, so a second hop rarely changes the answer.
+INQUIRY_ROUNDS_ASK = _int("CADYBOT_INQUIRY_ROUNDS_ASK", 1)
+INQUIRY_BUDGET_ASK = _int("CADYBOT_INQUIRY_BUDGET_ASK", 90)

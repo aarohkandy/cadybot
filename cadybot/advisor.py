@@ -598,10 +598,12 @@ def ask(
     snap: Dict[str, Any],
     guild_id: Optional[int] = None,
     backend: Optional[str] = None,
+    inq: Any = None,
 ) -> Verdict:
     result = llm.generate(
         prompts.stable_prefix(),
-        _turn(prompts.ASK_INSTRUCTION, snap, question),
+        _turn(prompts.ASK_INSTRUCTION, snap, question,
+              getattr(inq, "digest", None) or None),
         Verdict,
         "ask",
         guild_id or config.GUILD_ID,
@@ -612,12 +614,19 @@ def ask(
     # live server: the snapshot said one human and four bots, and the model
     # wrote "the server has 7 members" -- a number it read out of an
     # illustrative example in the prompt rather than out of the data.
+    # would_change_my_mind is rendered to the founder and reasoning is not, so
+    # the checked set follows what is shown rather than what is generated.
+    # Figures a lookup computed are citable; figures inside a quoted message are
+    # somebody's words and stay out of the set.
+    known = _numeric_literals(snap)
+    for block in (getattr(inq, "facts", None) or []):
+        known |= _numeric_literals(block)
     result._unverified = sorted(
         set(
             token
-            for text in (result.evidence, result.instead, result.reasoning)
+            for text in (result.evidence, result.instead, result.would_change_my_mind)
             if text
-            for token in verify_evidence(snap, text)
+            for token in verify_cited(known, text)
         )
     )
     return result
