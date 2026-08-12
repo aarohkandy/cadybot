@@ -561,6 +561,23 @@ def _normalise(token: str) -> str:
 _CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z])")
 
 
+def verify_cited(known: Set[str], text: Optional[str]) -> List[str]:
+    """Numbers cited in `text` that are not in `known`.
+
+    Split out of verify_evidence so a caller can widen the universe with figures
+    that came from a lookup rather than from the snapshot. The rule is the same
+    either way: a figure is citable when code computed it, and not otherwise.
+    """
+    if not text:
+        return []
+    missing: List[str] = []
+    for token in _CITED_NUMERAL.findall(text):
+        normalised = _normalise(token)
+        if normalised not in known and normalised not in missing:
+            missing.append(normalised)
+    return missing
+
+
 def verify_evidence(snap: Dict[str, Any], text: str) -> List[str]:
     """Numbers cited in `text` that appear nowhere in the snapshot.
 
@@ -570,15 +587,7 @@ def verify_evidence(snap: Dict[str, Any], text: str) -> List[str]:
     rate has not been measured across the scenarios yet. Auto-retracting on an
     unmeasured detector would be worse than the failure it catches.
     """
-    if not text:
-        return []
-    known = _numeric_literals(snap)
-    missing: List[str] = []
-    for token in _CITED_NUMERAL.findall(text):
-        normalised = _normalise(token)
-        if normalised not in known and normalised not in missing:
-            missing.append(normalised)
-    return missing
+    return verify_cited(_numeric_literals(snap), text)
 
 
 # --- entry points ----------------------------------------------------------
@@ -722,7 +731,8 @@ def register(result: Brief, snap: Dict[str, Any], guild_id: Optional[int] = None
 
 
 def chat(
-    guild_id: int, channel_id: int, message: str, speaker: str, snap: Dict[str, Any]
+    guild_id: int, channel_id: int, message: str, speaker: str, snap: Dict[str, Any],
+    inq: Any = None,
 ) -> str:
     """One conversational turn, with the running history and a fresh snapshot.
 
@@ -733,15 +743,34 @@ def chat(
     a second pre-registered bet, never on answering a question.
     """
     history = db.recent_turns(guild_id, channel_id)
-    latest = "%s\n\n```json\n%s\n```\n\n%s: %s" % (
+    parts = [
         prompts.CHAT_INSTRUCTION,
-        json.dumps(snap, indent=2, default=str),
-        speaker,
-        message,
-    )
+        "```json\n%s\n```" % json.dumps(snap, indent=2, default=str),
+    ]
+    if inq is not None and getattr(inq, "digest", ""):
+        parts.append(inq.digest)
+    parts.append("%s: %s" % (speaker, message))
     reply = llm.converse(
-        prompts.stable_prefix(), history + [{"role": "user", "content": latest}], guild_id
+        prompts.stable_prefix(),
+        history + [{"role": "user", "content": "\n\n".join(parts)}],
+        guild_id,
     )
+
+    # Chat has never had any verification at all. It gets it now, because a
+    # lookup makes provenance answerable: a figure is citable when the snapshot
+    # or a lookup computed it. Quotes are excluded on purpose — member text and
+    # stored advice contain figures like "spend 90 minutes" that are not facts
+    # about the server. Labelled rather than suppressed: this is a conversation
+    # the founder started, not something volunteered at him.
+    known = _numeric_literals(snap)
+    for block in (getattr(inq, "facts", None) or []):
+        known |= _numeric_literals(block)
+    unchecked = verify_cited(known, reply)
+    if unchecked:
+        reply += "\n\n_not from your data: %s_" % ", ".join(unchecked)
+    if inq is not None and getattr(inq, "footer", ""):
+        reply += "\n" + inq.footer
+
     db.add_turn(guild_id, channel_id, "user", message, speaker)
     db.add_turn(guild_id, channel_id, "assistant", reply)
     return reply

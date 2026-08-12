@@ -165,3 +165,11 @@ NOTES_CARRIED = 3
 def require_discord() -> None:
     if not DISCORD_TOKEN:
         raise SystemExit("DISCORD_TOKEN is not set. Copy .env.example to .env and fill it in.")
+
+# How much looking-up a reply may do before answering. Chat gets two rounds
+# because the one genuinely two-hop question in the tool surface is
+# channel_map -> channel_messages; /ask gets one because it is a verdict, not a
+# conversation. The desk gets none: it speaks unprompted, and widening the set
+# of citable figures widens what it volunteers.
+INQUIRY_ROUNDS_CHAT = _int("CADYBOT_INQUIRY_ROUNDS", 2)
+INQUIRY_BUDGET_CHAT = _int("CADYBOT_INQUIRY_BUDGET", 150)

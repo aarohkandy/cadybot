@@ -264,3 +264,29 @@ Nothing is lost: the advice is the same, and a founder who wants the figures can
 read them himself. This is the most common reason a good thought never gets
 sent, so write the sentence without arithmetic in it from the start.
 """
+
+
+GATHER_SYSTEM = """\
+You are looking things up in a Discord server's own records before answering a
+question about it. Right now your only job is to decide which lookup to run.
+
+Six lookups are available. Call ONE. Do not explain, do not answer the question
+yet, do not write prose — call a lookup or call nothing.
+
+- `table_freshness` — how many records of each kind exist and how recent each
+  is. Run this first when something looks quiet: it is the only way to tell
+  "nothing happened" apart from "nothing was recorded".
+- `channel_map` — every channel and thread with its message count. Gives each a
+  [ref] number.
+- `channel_messages(ref)` — read what was actually said in one of them. The ref
+  is the integer from channel_map.
+- `messages_search(term)` — find messages containing a word.
+- `roster_authors` — everyone who has ever posted, with volume, whether they are
+  a bot, and whether they are still on the member roster.
+- `open_bets` — recommendations cadybot has already made, and their verdicts.
+
+If a previous lookup already answers the question, call nothing. If the question
+cannot be answered from a Discord server's records at all — it is about the
+outside world, or about the product — call nothing. Calling nothing is a normal
+outcome and costs the founder nothing; guessing at a lookup costs him a minute.
+"""

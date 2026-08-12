@@ -299,3 +299,58 @@ def preflight() -> Optional[str]:
             ", ".join(sorted(names)) or "none",
         )
     return None
+
+
+def tool_round(
+    system_text: str,
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    guild_id=None,
+    keep_alive: Any = None,
+    timeout: Optional[float] = None,
+) -> Dict[str, Any]:
+    """One turn of a tool-calling conversation. Ollama only.
+
+    Deliberately unlike `generate`: no `format`, so no grammar is imposed. A
+    schema and a tools array are two different ways of constraining the same
+    decode, and asking for both is how you get neither.
+
+    `system_text` is a small purpose-built prompt, never `stable_prefix()`. The
+    stable prefix is about 4,100 tokens of startup-advisor persona and stage
+    gates, none of which helps decide which lookup to run, and sending it on
+    every round is what makes a tool loop unaffordable on CPU inference.
+
+    `keep_alive` is passed through so a caller can hold the model resident for
+    the length of one investigation. With the deployment's CADYBOT_OLLAMA_KEEP_ALIVE
+    of 0 each round would otherwise reload several gigabytes from disk.
+    """
+    if (config.BACKEND or "").lower() != "ollama":
+        raise BackendError("the lookup loop is ollama-only")
+    payload = {
+        "model": config.OLLAMA_MODEL,
+        "stream": False,
+        "think": False,
+        "messages": [{"role": "system", "content": system_text}] + list(messages),
+        "tools": tools,
+        "options": {"num_ctx": config.OLLAMA_NUM_CTX, "temperature": 0.1},
+    }
+    payload["keep_alive"] = config.OLLAMA_KEEP_ALIVE if keep_alive is None else keep_alive
+    try:
+        response = httpx.post(
+            "%s/api/chat" % config.OLLAMA_HOST,
+            json=payload,
+            timeout=timeout or config.OLLAMA_TIMEOUT,
+        )
+    except httpx.ConnectError:
+        raise BackendError(
+            "Cannot reach Ollama at %s. Is `ollama serve` running?" % config.OLLAMA_HOST
+        )
+    except httpx.ReadTimeout:
+        raise BackendError(
+            "Ollama did not answer within %ss." % (timeout or config.OLLAMA_TIMEOUT)
+        )
+    _ollama_error(response)
+    body = response.json()
+    db.record_local_run(guild_id, "gather", config.OLLAMA_MODEL,
+                        body.get("prompt_eval_count"), body.get("eval_count"))
+    return body.get("message") or {}

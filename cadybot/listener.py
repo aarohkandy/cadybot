@@ -24,8 +24,8 @@ from discord import app_commands
 from discord.ext import tasks
 
 from . import (
-    advisor, agenda, backfill, config, db, ledger, llm, loop, notify, room,
-    snapshot, thinking,
+    advisor, agenda, backfill, config, db, inquiry, ledger, llm, loop, notify,
+    room, snapshot, thinking,
 )
 
 INTENTS = discord.Intents.none()
@@ -428,6 +428,15 @@ class Cadybot(discord.Client):
             try:
                 async with message.channel.typing():
                     snap = snapshot.build(message.guild.id)
+                    # Look things up first, then answer. Both run on a worker
+                    # thread: db.connect() is thread-local and the whole turn
+                    # is minutes long on CPU inference. channel.typing()
+                    # re-triggers for the duration, so the wait shows as typing
+                    # rather than as dead air.
+                    inq = await asyncio.to_thread(
+                        inquiry.investigate, message.guild.id, text,
+                        config.INQUIRY_ROUNDS_CHAT, config.INQUIRY_BUDGET_CHAT,
+                    )
                     reply = await asyncio.to_thread(
                         advisor.chat,
                         message.guild.id,
@@ -435,6 +444,7 @@ class Cadybot(discord.Client):
                         text,
                         message.author.display_name,
                         snap,
+                        inq,
                     )
                 if reply:
                     await notify.send(message.channel, reply)
