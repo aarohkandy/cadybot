@@ -1102,7 +1102,12 @@ def render_stored(row: Any) -> str:
     the stored row back into the same shape render_reflection produces, without
     a second model call — the sentence was written and checked once.
     """
-    stub = type("_Held", (), {"kind": row["kind"], "about_ref": row["about_ref"]})()
+    stub = type("_Held", (), {
+        "kind": row["kind"], "about_ref": row["about_ref"],
+        # Replayed, not recomputed: the founder is told what was true when it
+        # was noticed, not what the database says by the time it is sent.
+        "finding": (row["finding"] if "finding" in row.keys() else None),
+    })()
     held = Reflection(
         restated="", reasoning="", evidence="",
         note_to_self=row["note_to_self"] or "held",

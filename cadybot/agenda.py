@@ -590,8 +590,8 @@ def open_attempt(guild_id: int, prov: Provocation) -> Optional[int]:
     try:
         cur = db.connect().execute(
             "INSERT INTO journal (guild_id, kind, provoked_by, about_ref, "
-            "                     started_at, self_prompt) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "                     started_at, self_prompt, finding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 guild_id,
                 prov.kind,
@@ -599,6 +599,11 @@ def open_attempt(guild_id: int, prov: Provocation) -> Optional[int]:
                 prov.about_ref,
                 db.now(),
                 prov.self_prompt,
+                # Persisted because the finding is written at provocation time
+                # and delivered on a later tick. Recomputing it at delivery
+                # would re-run SQL against a database that has moved on; storing
+                # it means the founder is told what was true when it was noticed.
+                prov.finding,
             ),
         )
     except sqlite3.IntegrityError:
@@ -742,7 +747,10 @@ def unsaid(guild_id: int, within_hours: int = 48) -> Optional[Dict[str, Any]]:
         "SELECT * FROM journal WHERE guild_id=? AND outcome='thought' "
         "AND surfaced_at IS NULL AND to_founder IS NOT NULL AND to_founder <> '' "
         "AND wanted_telling=1 AND (unverified IS NULL OR unverified IN ('', '[]')) "
-        "AND started_at >= ? ORDER BY id DESC LIMIT 1",
+        # A thought carrying a SQL-written finding outranks one that is only
+        # prose, however recent. Otherwise a generic reflection generated
+        # minutes later buries the one that actually found something.
+        "AND started_at >= ? ORDER BY (finding IS NOT NULL) DESC, id DESC LIMIT 1",
         (guild_id, db.hours_ago(within_hours)),
     )
 

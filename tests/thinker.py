@@ -968,6 +968,34 @@ check("59d and the enum reaches the schema the grammar is built from",
 check("60 plays.py stays model-free",
       not (imports((ROOT / "cadybot" / "plays.py").read_text()) & {"advisor", "llm"}))
 
+# 61: the finding is written at provocation time and delivered on a later tick,
+# so it has to survive the gap. It did not: Provocation.finding was computed and
+# never stored, and the deferred path rebuilt a Provocation without it.
+gid = fresh(900900)
+db.connect().execute(
+    "INSERT INTO journal (guild_id, kind, provoked_by, about_ref, started_at, "
+    "self_prompt, outcome, to_founder, note_to_self, watch_metric, unverified, "
+    "wanted_telling, finding) VALUES (?,?,?,?,?,?, 'thought', ?, ?, ?, '[]', 1, ?)",
+    (gid, "backlog", ago(hours=3), None, ago(hours=3), "sp",
+     "Answer them, even now.", "", "activity.messages_7d",
+     "**someone** wrote in #hermes and nobody replied."))
+held = agenda.unsaid(gid)
+check("61 a stored finding survives to delivery", held is not None and held["finding"])
+check("61b and is rendered above the prose",
+      held is not None
+      and advisor.render_stored(held).index("nobody replied")
+        < advisor.render_stored(held).index("Answer them"))
+
+# 61c: a later generic thought must not bury one that actually found something.
+db.connect().execute(
+    "INSERT INTO journal (guild_id, kind, provoked_by, about_ref, started_at, "
+    "self_prompt, outcome, to_founder, note_to_self, watch_metric, unverified, "
+    "wanted_telling, finding) VALUES (?,?,?,?,?,?, 'thought', ?, ?, ?, '[]', 1, NULL)",
+    (gid, "verdict", ago(hours=1), "R-9", ago(hours=1), "sp",
+     "Post an artifact this week.", "", "activity.messages_7d"))
+check("61c a finding outranks a newer generic thought",
+      (agenda.unsaid(gid) or {})["kind"] == "backlog")
+
 # ------------------------------------------------------------------- report
 
 print()

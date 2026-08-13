@@ -273,6 +273,7 @@ CREATE TABLE IF NOT EXISTS journal (
     failure       TEXT,
     wanted_telling INTEGER NOT NULL DEFAULT 0,        -- the model lifted its veto
     attempts      INTEGER NOT NULL DEFAULT 1,         -- a timed-out backend gets one retry
+    finding       TEXT,                               -- the SQL-written headline fact
     surfaced_at   TEXT,
     model         TEXT,
     UNIQUE (guild_id, kind, provoked_by)
@@ -313,6 +314,11 @@ MIGRATIONS: List[Tuple[str, str, str]] = [
     ("members", "pending", "INTEGER NOT NULL DEFAULT 0"),
     ("members", "premium_since", "TEXT"),
     ("members", "timed_out_until", "TEXT"),
+    # journal already exists on the live database, so CREATE TABLE IF NOT EXISTS
+    # will not add these; every post-release column has to appear twice.
+    ("journal", "wanted_telling", "INTEGER NOT NULL DEFAULT 0"),
+    ("journal", "attempts", "INTEGER NOT NULL DEFAULT 1"),
+    ("journal", "finding", "TEXT"),
 ]
 
 # Settings row marking the one-off phantom sweep as already done. guild_id 0 is
