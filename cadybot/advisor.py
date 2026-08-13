@@ -1067,12 +1067,20 @@ def render_reflection(r: Reflection, prov: Any) -> str:
     what set it off, so an unprompted message never arrives without a reason
     attached.
     """
-    lines = ["**A thought.**", "", (r.to_founder or "").strip(), ""]
+    lines = ["**A thought.**", ""]
+    # The finding first, and written by code. A model that has to *notice* the
+    # fact buries it about two runs in three; one that only has to write around
+    # a stated fact cannot lose it.
+    found = getattr(prov, "finding", None)
+    if found:
+        lines += [found, ""]
+    lines += [(r.to_founder or "").strip(), ""]
     because = {
         "verdict": "a recommendation closed",
         "life": "somebody posted after a silent month",
         "joined": "somebody joined after a quiet fortnight",
         "drift": "a count moved over the last fortnight",
+        "backlog": "reading this server's history for the first time",
     }.get(prov.kind, prov.kind)
     trail = "_Prompted by %s" % because
     if prov.about_ref:

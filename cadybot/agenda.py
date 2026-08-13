@@ -106,6 +106,13 @@ class Provocation:
     self_prompt: str
     about_ref: Optional[str] = None
     numbers: Tuple[str, ...] = ()       # figures this block injected, for verify_evidence
+    # A sentence composed here, from SQL, stating the finding itself. Rendered
+    # above whatever the model writes. Three runs of the same provocation on the
+    # live server produced the finding once and generic advice twice, and two
+    # larger local models did no better — one of them recommended recognising
+    # the contributions of a bot. The fact is deterministic; only the prose
+    # around it needs a model, so the fact stops depending on one.
+    finding: Optional[str] = None
 
 
 # --- installation ----------------------------------------------------------
@@ -167,6 +174,19 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
         blocks.append("## %s\n%s" % (name, finding.body[:900]))
         numbers.extend(_numerals(*[v for v in _flat_numbers(finding.facts)]))
 
+    # The headline fact, decided by SQL rather than by whoever is reading.
+    ignored = probe.run(guild_id, "unanswered_history", {"limit": 4})
+    finding = None
+    if ignored.rows and ignored.facts.get("ignored"):
+        first = ignored.facts["ignored"][0]
+        gone = " They are no longer in the server." if not first.get("on_roster") else ""
+        finding = (
+            "**%s** wrote in #%s on %s and nobody ever replied.%s"
+            % (first["author"], first["channel"] or "?", (first["at"] or "")[:10], gone)
+        )
+        if ignored.rows > 1:
+            finding += " %d messages in this server's history were never answered." % ignored.rows
+
     prompt = "\n".join([
         "# What happened",
         "",
@@ -196,7 +216,8 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
         "Do not open with what he already knows. He knows the server is quiet. He",
         "knows he has not posted. Telling him again is worse than saying nothing.",
     ])
-    return Provocation("backlog", row["at"], prompt, None, tuple(dict.fromkeys(numbers)))
+    return Provocation("backlog", row["at"], prompt, None,
+                       tuple(dict.fromkeys(numbers)), finding)
 
 
 def _from_verdict(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
