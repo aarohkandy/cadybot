@@ -275,19 +275,14 @@ class Reflection(BaseModel):
         unusual one, and what does get through is bounded by two sentences and
         sixty days.
         """
-        if re.search(r"\d", value):
-            raise ValueError(
-                "note_to_self must be qualitative — no numbers. A number written "
-                "down today is wrong in a month, and this is read in a month."
-            )
-        spelled = re.search(_SPELLED_NUMBER, value, re.IGNORECASE)
-        if spelled:
-            raise ValueError(
-                "note_to_self must be qualitative, and %r is a quantity written "
-                "out in words. Say what changed, not how much — the number will "
-                "be in the snapshot when you read this back."
-                % spelled.group(0)
-            )
+        # Dropped rather than refused. Raising here fails the whole Reflection,
+        # and on CPU inference that is a four-minute generation thrown away
+        # because the least important field — a private note nobody reads —
+        # contained "0 messages". The guarantee is about what gets *stored*, and
+        # an empty note stores nothing: agenda.live_notes already filters
+        # `note_to_self <> ''`, so a discarded note is simply not carried.
+        if re.search(r"\d", value) or re.search(_SPELLED_NUMBER, value, re.IGNORECASE):
+            return ""
         return value
 
 

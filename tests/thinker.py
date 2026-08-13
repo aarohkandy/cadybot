@@ -485,12 +485,10 @@ BASE = dict(
     restated="q", reasoning="r", evidence="e",
     watch_metric="activity.messages_7d", worth_telling_founder=False,
 )
-try:
-    advisor.Reflection(note_to_self="joins fell to 3 this week", **BASE)
-    ok28 = False
-except ValidationError:
-    ok28 = True
-check("28 a note may not carry a number", ok28,
+# Dropped, not refused: raising costs the whole generation over the least
+# important field. What matters is that nothing numeric is ever stored.
+ok28 = advisor.Reflection(note_to_self="joins fell to 3 this week", **BASE).note_to_self == ""
+check("28 a note carrying a number is discarded", ok28,
       "a number written down today is wrong in a month")
 check(
     "28b the same note without one is fine",
@@ -502,13 +500,10 @@ for spelled in ("Activity fell to four a week and joins to two.",
                 "Roughly a third of members went quiet.",
                 "About twelve people are still active.",
                 "Half the server never posted."):
-    try:
-        advisor.Reflection(note_to_self=spelled, **BASE)
+    if advisor.Reflection(note_to_self=spelled, **BASE).note_to_self != "":
         ok28c, why = False, spelled
-    except ValidationError:
-        ok28c, why = True, ""
-    if not ok28c:
         break
+    ok28c, why = True, ""
 check("28c nor a quantity written out in words", ok28c, why)
 
 # and the note has to stay writable, or the model just stops writing them
