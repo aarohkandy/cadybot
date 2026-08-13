@@ -345,7 +345,24 @@ def _from_verdict(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
             "founder did not act\" is a complete and frequently correct answer.",
         ]
     )
-    return Provocation("verdict", row["verdict_at"], prompt, scorecard.ref(row["id"]), numbers)
+    # The verdict, stated by the code that computed it. Left to the model, it
+    # gets relabelled: an `inconclusive` grade came back to the founder as "the
+    # prediction failed... even after your outreach", which invents both a
+    # verdict and an action he was never recorded as taking. This is the same
+    # reason render_scorecard prints _VERDICT_LABEL rather than letting a model
+    # narrate an outcome.
+    finding = "%s: %s — %s." % (
+        scorecard.ref(row["id"]),
+        {"worked": "moved as predicted", "failed": "did not move",
+         "harmful": "guardrail broke", "revoked": "moved, then fell back",
+         "inconclusive": "no separable change",
+         "not_attempted": "no sign it was tried",
+         "unmeasurable": "not measurable"}.get(row["verdict"], row["verdict"]),
+        "%s was %s at issue and is %s now"
+        % (row["metric"], _fmt(row["baseline"]), _fmt(row["verdict_current"])),
+    )
+    return Provocation("verdict", row["verdict_at"], prompt,
+                       scorecard.ref(row["id"]), numbers, finding)
 
 
 def _from_life(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:

@@ -1061,6 +1061,23 @@ check("64d somebody who got a reply is not the one it names",
       p64d is None or "asker" not in (p64d.finding or ""),
       p64d.finding if p64d else None)
 
+# 65: a verdict is computed by scorecard and must not be relabelled. Observed
+# live: an `inconclusive` grade came back as "The prediction failed... even
+# after your outreach", inventing both the verdict and an action.
+gid = fresh(900930)
+db.connect().execute(
+    "INSERT INTO recommendations (guild_id, created_at, headline, action, metric, "
+    "prediction, verdict, verdict_at, baseline, threshold, verdict_current) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    (gid, ago(days=20), "h", "do the thing", "activity.messages_7d",
+     "p", "inconclusive", ago(hours=2), 0.0, 1.0, 0.0))
+p65 = agenda.next_provocation(gid, empty_snap())
+check("65 the verdict reaches the founder in scorecard's own words",
+      p65 is not None and p65.finding and "no separable change" in p65.finding,
+      p65.finding if p65 else None)
+check("65b and never as a word the code did not choose",
+      p65 is not None and "failed" not in (p65.finding or ""), p65.finding if p65 else None)
+
 # ------------------------------------------------------------------- report
 
 print()
