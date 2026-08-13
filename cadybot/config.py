@@ -152,9 +152,16 @@ THINK_SURFACE_BACKENDS = tuple(
 # uses. The gap is measured against every kind of delivery, so the nightly, the
 # weekly, the unanswered-question alert and the desk finally know about each
 # other.
-SURFACE_MAX_PER_WEEK = 1
-SURFACE_MIN_GAP_HOURS = 20
-SURFACE_WINDOW_UTC = (14, 20)
+# Set once at a level that meant cadybot never spoke at all: one message a week
+# inside a six-hour window, on a bot that had produced zero provocations in its
+# lifetime. Restraint is right; silence is not the same thing as restraint, and
+# a founder who has to open the app to find out it thought something has not
+# been told anything.
+SURFACE_MAX_PER_WEEK = _int("CADYBOT_SURFACE_PER_WEEK", 3)
+SURFACE_MIN_GAP_HOURS = _int("CADYBOT_SURFACE_GAP_HOURS", 8)
+# 13:00-23:00 UTC is 06:00-16:00 Pacific. The founder's own messages land across
+# that span; the previous 14:00-20:00 covered a third of it.
+SURFACE_WINDOW_UTC = (13, 23)
 
 # A note cadybot leaves itself rides into a later brief. Both numbers exist so
 # carried context cannot grow with uptime.

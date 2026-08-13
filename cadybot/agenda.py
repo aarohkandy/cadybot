@@ -44,7 +44,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import config, db, ledger, scorecard, snapshot
+from . import config, db, ledger, probe, scorecard, snapshot
 
 # When this guild first grew an agenda. Everything with an earlier timestamp is
 # history rather than news, which is what stops installation day from firing
@@ -58,12 +58,19 @@ QUIET_KEY = "agenda_quiet_until"
 # Precedence. First match wins, and there is no scoring: a ranking formula over
 # hand-tuned weights was tried in design and froze solid after one cycle, which
 # is what ranking formulas over hand-tuned weights do.
-KINDS = ("verdict", "life", "joined", "context", "drift")
+KINDS = ("backlog", "verdict", "life", "joined", "context", "drift")
 
 # Which kinds may ever reach the founder unprompted. `context` is deliberately
 # absent: reacting to the founder editing his own notes file is thinking worth
 # recording and never an interruption worth making.
-SURFACEABLE = ("verdict", "life", "joined", "drift")
+SURFACEABLE = ("backlog", "verdict", "life", "joined", "drift")
+
+# The one generator allowed to point at a timestamp older than the agenda.
+# Everything else treats the past as history the founder has already lived
+# through; `backlog` exists precisely because he has not — nothing had ever read
+# it. It still fires once, because its timestamp is the newest historical
+# message and that does not move.
+LOOKS_BACK = ("backlog",)
 
 # A join is only news if it broke a drought. On a 500-member server joins are
 # weather; on a one-human server the first one in a fortnight is the single most
@@ -118,6 +125,67 @@ def installed_at(guild_id: int) -> str:
 # Each returns a Provocation or None. Each reads its timestamp out of storage.
 
 
+def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
+    """The message history exists and has never been read.
+
+    Every other provocation waits for something to happen. This one fires on
+    something that already did: there are messages in this database that predate
+    the agenda, and until probe.py existed no model could read a word of them.
+    A corpus becoming readable for the first time is a real event, and the rows
+    that make it real are the messages themselves.
+
+    Fires exactly once per server, because `_already_thought` keys on
+    provoked_by and the newest historical message does not move. It is the only
+    provocation that looks backwards, and that is the point — a bot installed on
+    a server with three months of history should not have to wait for the fourth
+    month to have something to say.
+    """
+    row = db.one(
+        "SELECT MAX(m.created_at) AS at, COUNT(*) AS n FROM messages m "
+        "LEFT JOIN members mem ON mem.guild_id = m.guild_id AND mem.user_id = m.author_id "
+        "WHERE m.guild_id=? AND m.type IN (0, 19)",
+        (guild_id,),
+    )
+    if not row or not row["at"] or (row["n"] or 0) < 10:
+        return None
+    if row["at"] >= since:
+        return None                       # not a backlog; the live generators own it
+
+    # Real lookups, run now, so the question carries evidence rather than a
+    # suggestion to go and find some.
+    blocks = []
+    numbers: List[str] = []
+    for name, args in (("roster_authors", {}), ("table_freshness", {}),
+                       ("channel_map", {"days": 3650})):
+        finding = probe.run(guild_id, name, args)
+        if finding.error:
+            continue
+        blocks.append("## %s\n%s" % (name, finding.body[:900]))
+        numbers.extend(_numerals(*[v for v in _flat_numbers(finding.facts)]))
+
+    prompt = "\n".join([
+        "# What happened",
+        "",
+        "Nothing just happened. This is the opposite: this server has %d messages"
+        % row["n"],
+        "of history, the newest from %s, and until now no model has ever been able"
+        % row["at"][:10],
+        "to read any of it. You can now. Below is what the records actually say.",
+        "",
+    ] + blocks + [
+        "",
+        "# Your question",
+        "",
+        "What is true about this server that the founder probably does not know,",
+        "and that he could only learn by someone reading the actual messages? Name",
+        "the single most useful one. A specific person who did something specific",
+        "beats any summary. If the honest answer is that the history contains",
+        "nothing he does not already know, say that instead — but say it having",
+        "looked.",
+    ])
+    return Provocation("backlog", row["at"], prompt, None, tuple(dict.fromkeys(numbers)))
+
+
 def _from_verdict(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
     """A recommendation closed. The one moment cadybot has an oracle.
 
@@ -128,6 +196,15 @@ def _from_verdict(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
     negative; a verdict computed by scorecard.py is precisely the external
     signal that makes reflection worth doing rather than harmful.
     """
+    # The verdict columns are added by scorecard's own migration, not by
+    # db.SCHEMA, so on a database where that has never run they do not exist and
+    # this SELECT raises. agenda must not import scorecard — that would put the
+    # grader one import from the model path — so ask the database instead.
+    present = set(
+        r[1] for r in db.connect().execute("PRAGMA table_info(recommendations)")
+    )
+    if not {"verdict", "verdict_at"} <= present:
+        return None
     row = db.one(
         "SELECT id, action, prediction, verdict, verdict_at, verdict_current, "
         "       verdict_pvalue, baseline, threshold, metric, created_at "
@@ -380,6 +457,7 @@ def _from_drift(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Pro
 
 
 _GENERATORS = {
+    "backlog": _from_backlog,
     "verdict": _from_verdict,
     "life": _from_life,
     "joined": _from_join,
@@ -419,7 +497,7 @@ def next_provocation(guild_id: int, snap: Dict[str, Any]) -> Optional[Provocatio
             continue
         if prov.provoked_by >= started_at:
             continue  # hasn't happened yet by this clock; look again next tick
-        if prov.provoked_by <= installed:
+        if prov.provoked_by <= installed and kind not in LOOKS_BACK:
             continue  # older than the agenda: history, not news
         if _already_thought(guild_id, prov):
             continue
@@ -683,6 +761,22 @@ def recent(guild_id: int, limit: int = 10) -> List[Dict[str, Any]]:
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _flat_numbers(node: Any) -> List[Any]:
+    """Every numeric leaf in a findings dict, so the model may cite them."""
+    out: List[Any] = []
+    if isinstance(node, dict):
+        for v in node.values():
+            out.extend(_flat_numbers(v))
+    elif isinstance(node, (list, tuple)):
+        for v in node:
+            out.extend(_flat_numbers(v))
+    elif isinstance(node, bool):
+        return out
+    elif isinstance(node, (int, float)):
+        out.append(node)
+    return out
 
 
 def _fmt(value: Optional[float]) -> str:

@@ -455,17 +455,20 @@ db.connect().execute("UPDATE deliveries SET at=? WHERE guild_id=?", (ago(hours=3
 allowed, why = agenda.may_surface(gid, surf)
 check("25b a day later it may", allowed is True, why)
 
+_perweek = config.SURFACE_MAX_PER_WEEK
+config.SURFACE_MAX_PER_WEEK = 1
 db.connect().execute(
     "INSERT INTO deliveries (guild_id, at, kind, chars) VALUES (?, ?, 'thought', 10)",
     (gid, ago(days=3)),
 )
 allowed, why = agenda.may_surface(gid, surf)
-check("26 one volunteered thought a week", allowed is False and "this week" in why, why)
+check("26 the weekly ceiling holds", allowed is False and "this week" in why, why)
 db.connect().execute(
     "UPDATE deliveries SET at=? WHERE guild_id=? AND kind='thought'", (ago(days=8), gid)
 )
 allowed, why = agenda.may_surface(gid, surf)
 check("26b next week it may again", allowed is True, why)
+config.SURFACE_MAX_PER_WEEK = _perweek
 
 db.set_setting(gid, agenda.QUIET_KEY, iso(datetime.now(timezone.utc) + timedelta(days=2)))
 allowed, why = agenda.may_surface(gid, surf)
@@ -564,8 +567,12 @@ db.connect().execute(
     (gid, ago(days=5)),
 )
 close_day(gid, ledger.day_offset(1), "activity.messages_30d", 0.0)
+first = agenda.next_provocation(gid, empty_snap())
+check("32 the unread history is worth exactly one thought",
+      first is not None and first.kind == "backlog", first.kind if first else None)
+agenda.open_attempt(gid, first)
 quiet = all(agenda.next_provocation(gid, empty_snap()) is None for _ in range(120))
-check("32 a month on the live server: not one thought", quiet)
+check("32b and then a month of ticks produces none", quiet)
 
 db.connect().execute(
     "UPDATE recommendations SET verdict='not_attempted', verdict_at=?, verdict_current=0.0 "
