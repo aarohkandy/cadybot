@@ -98,12 +98,23 @@ def member(gid, uid, is_bot=0, name="m"):
     )
 
 
-def message(gid, mid, uid, when, channel=5000):
+def message(gid, mid, uid, when, channel=5000, answered=False):
     db.connect().execute(
         "INSERT OR REPLACE INTO messages (guild_id, channel_id, message_id, author_id, "
         "created_at, content, type) VALUES (?, ?, ?, ?, ?, ?, 0)",
-        (gid, channel, mid, uid, when, "hello"),
+        (gid, channel, mid, uid, when, "hello there", ),
     )
+    if answered:
+        # An unanswered message is now the highest-precedence provocation, so a
+        # fixture that only wants a message to exist has to reply to it or it
+        # shadows whatever the test is actually about.
+        member(gid, uid + 5000, name="replier")
+        db.connect().execute(
+            "INSERT OR REPLACE INTO messages (guild_id, channel_id, message_id, "
+            "author_id, created_at, content, type) VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (gid, channel, mid + 500000, uid + 5000,
+             iso(datetime.fromisoformat(when) + timedelta(hours=1)), "replied", ),
+        )
 
 
 def close_day(gid, day, metric, value):
@@ -262,7 +273,7 @@ def build_every_kind():
 
     g = fresh(900204)
     member(g, 1, name="human")
-    message(g, 12, 1, ago(days=2))
+    message(g, 12, 1, ago(days=2), answered=True)
     close_day(g, ledger.day_offset(ledger.DRIFT_DAYS), "activity.messages_30d", 0.0)
     close_day(g, ledger.today(), "activity.messages_30d", 40.0)
     out.append(g)
@@ -361,7 +372,7 @@ check("13b a join after a drought provokes", prov is not None and prov.kind == "
 
 gid = fresh()
 member(gid, 1, name="human")
-message(gid, 30, 1, ago(days=2))
+message(gid, 30, 1, ago(days=2), answered=True)
 for metric in ("activity.messages_30d", "structure.mentions_30d"):
     close_day(gid, ledger.day_offset(ledger.DRIFT_DAYS), metric, 0.0)
     close_day(gid, ledger.today(), metric, 40.0)
@@ -714,7 +725,7 @@ advisor.llm.generate = lambda *a, **k: advisor.Reflection(**REPLY)
 said = asyncio.run(thinking.think(_Client(), E2E))
 row = _last_journal()
 check("40 the whole pass runs and speaks", said is not None and len(sent) == 1)
-check("40b it says why it spoke", "Prompted by a recommendation closed" in (said or ""))
+check("40b it says why it spoke", "came due" in (said or ""), (said or "")[-160:])
 check("40c the thought is journalled", row and row["outcome"] == "thought")
 check("40d and marked as said", row and row["surfaced_at"] is not None)
 check("40e and logged as a delivery", db.deliveries_since(E2E, ago(hours=1), "thought") == 1)
@@ -813,13 +824,13 @@ check("47 a burst of joins is news, not noise", burst is not None and burst.kind
 # while reporting the identical unchanged observation.
 gid = fresh(900703)
 member(gid, 1, name="human")
-message(gid, 70, 1, ago(days=2))
+message(gid, 70, 1, ago(days=2), answered=True)
 close_day(gid, ledger.day_offset(ledger.DRIFT_DAYS), "activity.messages_30d", 0.0)
 close_day(gid, ledger.today(), "activity.messages_30d", 40.0)
 d1 = agenda.next_provocation(gid, empty_snap())
 check("48 drift provokes once", d1 is not None and d1.kind == "drift")
 agenda.open_attempt(gid, d1)
-message(gid, 71, 1, ago(hours=1))          # somebody posts again
+message(gid, 71, 1, ago(hours=1), answered=True)          # somebody posts again
 d2 = agenda.next_provocation(gid, empty_snap())
 check("48b and not again on the next message", d2 is None or d2.kind != "drift",
       d2.kind if d2 else None)
@@ -1019,6 +1030,36 @@ held = agenda.unsaid(gid)
 check("63 a thought that can never be said does not block the queue",
       held is not None and held["kind"] == "backlog",
       held["kind"] if held else None)
+
+# 64: an unanswered message is the only provocation about a person currently
+# being let down, so it outranks everything — and it is the one thing the
+# founder can fix in a minute.
+gid = fresh(900920)
+member(gid, 1, name="asker")
+message(gid, 80, 1, ago(hours=72))              # past the 48h answer window
+p64 = agenda.next_provocation(gid, empty_snap())
+check("64 an ignored message is the first thing it notices",
+      p64 is not None and p64.kind == "ignored", p64.kind if p64 else None)
+check("64b and it names who, where and when, from SQL",
+      p64 is not None and p64.finding and "asker" in p64.finding, p64.finding if p64 else None)
+
+# still inside the answer window: not yet a failure
+gid = fresh(900921)
+member(gid, 1, name="asker")
+message(gid, 81, 1, ago(hours=2))
+check("64c a message still inside the reply window is not one",
+      (agenda.next_provocation(gid, empty_snap()) or type("x", (), {"kind": None})).kind != "ignored")
+
+# Answered, so the asker is no longer the one being let down. (The reply is
+# itself unreplied-to, which is correct and is why this asserts on who rather
+# than on whether — the last word in a channel always awaits an answer.)
+gid = fresh(900922)
+member(gid, 1, name="asker")
+message(gid, 82, 1, ago(hours=72), answered=True)
+p64d = agenda.next_provocation(gid, empty_snap())
+check("64d somebody who got a reply is not the one it names",
+      p64d is None or "asker" not in (p64d.finding or ""),
+      p64d.finding if p64d else None)
 
 # ------------------------------------------------------------------- report
 

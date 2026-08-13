@@ -267,7 +267,7 @@ def _channel_messages(conn, guild_id, ref=1, limit=12):
     rows = conn.execute(
         "SELECT m.created_at, "
         "       COALESCE(mem.display_name, mem.username, "
-        "                'someone who left before cadybot arrived') AS author, "
+        "                'someone who has since left') AS author, "
         "       COALESCE(mem.is_bot, 0) AS is_bot, m.content "
         "FROM messages m LEFT JOIN members mem "
         "  ON mem.guild_id = m.guild_id AND mem.user_id = m.author_id "
@@ -305,7 +305,7 @@ def _messages_search(conn, guild_id, term="", days=365, limit=8):
     rows = conn.execute(
         "SELECT m.created_at, c.name AS channel, "
         "       COALESCE(mem.display_name, mem.username, "
-        "                'someone who left before cadybot arrived') AS author, "
+        "                'someone who has since left') AS author, "
         "       COALESCE(mem.is_bot, 0) AS is_bot, m.content "
         "FROM messages m "
         "LEFT JOIN channels c ON c.guild_id = m.guild_id AND c.channel_id = m.channel_id "
@@ -361,7 +361,7 @@ def _roster_authors(conn, guild_id, days=3650):
     listed, lines = [], []
     for r in rows:
         name = (r["display_name"] or r["username"]
-                or "someone who left before cadybot arrived")
+                or "someone who has since left")
         listed.append({
             "author": name, "messages": r["n"], "is_bot": bool(r["is_bot"]),
             "on_roster": bool(r["on_roster"]), "first_at": r["first_at"],
@@ -402,7 +402,7 @@ def _unanswered_history(conn, guild_id, limit=8):
     rows = conn.execute(
         "SELECT m.created_at, m.content, c.name AS channel, "
         "       COALESCE(mem.display_name, mem.username, "
-        "                'someone who left before cadybot arrived') AS author, "
+        "                'someone who has since left') AS author, "
         "       (mem.user_id IS NOT NULL) AS on_roster "
         "FROM messages m "
         "LEFT JOIN channels c ON c.guild_id=m.guild_id AND c.channel_id=m.channel_id "

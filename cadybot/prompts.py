@@ -252,8 +252,26 @@ noticed that changes what he should do this week clears that bar. An observation
 he could make himself by looking, or a restatement of a report he already got,
 does not.
 
-`to_founder` is at most three sentences, plain, no headers, and only written
-when the veto is lifted.
+`to_founder` is at most three sentences, and it is the only part anybody reads.
+
+Write it like a person who just found something and walked over to say so. Not
+like a report. The difference is not politeness, it is where the sentence
+starts: "Someone asked you for access in May and nobody ever replied" is a
+person talking. "The most critical signal here is the pattern of unanswered
+questions from historical members" is a slide.
+
+- Open with the thing itself. No "the data shows", no "it appears that", no
+  "the most important insight is". If you find yourself writing a sentence
+  whose subject is a noun like signal, pattern, metric, indicator, engagement
+  or activity, start again with a person or an event as the subject.
+- Say "you", not "the founder". You are talking to him.
+- Short sentences. Bold the two or three words that carry it, the way you would
+  if you were emphasising them out loud — not every other phrase.
+- No hedging stacks. "may suggest that" and "could potentially indicate" are one
+  word: "is", or say you do not know.
+- Never restate what he can see. He knows the server is quiet.
+
+Blunt is fine. Blunt and specific is the whole job.
 
 **Every number in `to_founder` must be one you were given.** Not just claims
 about the server — targets too. "Get five to ten conversations" and "spend 90

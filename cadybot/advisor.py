@@ -1073,7 +1073,10 @@ def render_reflection(r: Reflection, prov: Any) -> str:
     what set it off, so an unprompted message never arrives without a reason
     attached.
     """
-    lines = ["**A thought.**", ""]
+    # No "A thought." header. A person walking over to tell you something does
+    # not announce the category of utterance first; the finding is the opening
+    # line, and the provenance goes at the bottom where a footnote belongs.
+    lines = []
     # The finding first, and written by code. A model that has to *notice* the
     # fact buries it about two runs in three; one that only has to write around
     # a stated fact cannot lose it.
@@ -1082,16 +1085,17 @@ def render_reflection(r: Reflection, prov: Any) -> str:
         lines += [found, ""]
     lines += [(r.to_founder or "").strip(), ""]
     because = {
-        "verdict": "a recommendation closed",
-        "life": "somebody posted after a silent month",
-        "joined": "somebody joined after a quiet fortnight",
-        "drift": "a count moved over the last fortnight",
-        "backlog": "reading this server's history for the first time",
+        "verdict": "one of my calls just came due",
+        "life": "somebody posted, after a month of nothing",
+        "joined": "somebody joined, first in a fortnight",
+        "drift": "a count moved over the last two weeks",
+        "backlog": "I read your history for the first time",
+        "ignored": "somebody's message has gone unanswered",
     }.get(prov.kind, prov.kind)
-    trail = "_Prompted by %s" % because
+    trail = "_%s" % because
     if prov.about_ref:
         trail += " (%s)" % prov.about_ref
-    lines.append(trail + ". Nobody asked me; `/quiet 7` stops this._")
+    lines.append(trail + " — you didn't ask, and `/quiet 7` stops me._")
     if r._unverified:
         lines.append(
             "_Unverified numbers: %s — not found in the snapshot._"

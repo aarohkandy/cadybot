@@ -118,7 +118,10 @@ SPEAK_THRESHOLD_MESSAGES = 10
 
 # How often the desk checks whether anything has happened. Cheap: the common
 # outcome is a handful of indexed SELECTs that find nothing and return.
-THINK_INTERVAL_HOURS = 6
+# Every three hours. The tick is cheap — a handful of indexed SELECTs that
+# almost always find nothing — and the thing that actually bounds how often
+# cadybot speaks is how often something happens, not how often it looks.
+THINK_INTERVAL_HOURS = _int("CADYBOT_THINK_INTERVAL_HOURS", 3)
 
 # discord.ext.tasks runs an interval loop once immediately on start, so with
 # Restart=always a crash loop would attempt a pass every ten seconds — on the
@@ -129,7 +132,7 @@ THINK_START_DELAY_SECONDS = 60
 # written *before* the call, so a failure is charged like a success — the calls
 # that time out are the expensive ones. Set to 0 to stop thinking entirely
 # without touching code.
-THINK_CALLS_PER_DAY = _int("CADYBOT_THINK_CALLS_PER_DAY", 2)
+THINK_CALLS_PER_DAY = _int("CADYBOT_THINK_CALLS_PER_DAY", 4)
 
 # Backends allowed to speak unprompted. Thinking happens on any backend and the
 # journal fills either way; this only controls initiating.
@@ -157,11 +160,13 @@ THINK_SURFACE_BACKENDS = tuple(
 # lifetime. Restraint is right; silence is not the same thing as restraint, and
 # a founder who has to open the app to find out it thought something has not
 # been told anything.
-SURFACE_MAX_PER_WEEK = _int("CADYBOT_SURFACE_PER_WEEK", 3)
-SURFACE_MIN_GAP_HOURS = _int("CADYBOT_SURFACE_GAP_HOURS", 8)
+SURFACE_MAX_PER_WEEK = _int("CADYBOT_SURFACE_PER_WEEK", 7)
+SURFACE_MIN_GAP_HOURS = _int("CADYBOT_SURFACE_GAP_HOURS", 5)
 # 13:00-23:00 UTC is 06:00-16:00 Pacific. The founder's own messages land across
 # that span; the previous 14:00-20:00 covered a third of it.
-SURFACE_WINDOW_UTC = (13, 23)
+# 12:00-24:00 UTC is 05:00-17:00 Pacific — his whole waking day rather than a
+# slice of the morning. Still a window: nothing arrives while he is asleep.
+SURFACE_WINDOW_UTC = (12, 24)
 
 # A note cadybot leaves itself rides into a later brief. Both numbers exist so
 # carried context cannot grow with uptime.

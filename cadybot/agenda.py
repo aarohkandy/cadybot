@@ -58,12 +58,12 @@ QUIET_KEY = "agenda_quiet_until"
 # Precedence. First match wins, and there is no scoring: a ranking formula over
 # hand-tuned weights was tried in design and froze solid after one cycle, which
 # is what ranking formulas over hand-tuned weights do.
-KINDS = ("backlog", "verdict", "life", "joined", "context", "drift")
+KINDS = ("ignored", "backlog", "verdict", "life", "joined", "context", "drift")
 
 # Which kinds may ever reach the founder unprompted. `context` is deliberately
 # absent: reacting to the founder editing his own notes file is thinking worth
 # recording and never an interruption worth making.
-SURFACEABLE = ("backlog", "verdict", "life", "joined", "drift")
+SURFACEABLE = ("ignored", "backlog", "verdict", "life", "joined", "drift")
 
 # The one generator allowed to point at a timestamp older than the agenda.
 # Everything else treats the past as history the founder has already lived
@@ -130,6 +130,66 @@ def installed_at(guild_id: int) -> str:
 # --- the five generators ---------------------------------------------------
 #
 # Each returns a Provocation or None. Each reads its timestamp out of storage.
+
+
+
+def _from_ignored(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
+    """Somebody wrote something and nobody answered them.
+
+    First in precedence, ahead of everything including the backlog, because it
+    is the only provocation about a person who is currently being let down
+    rather than a number that moved. It is also the one thing on this list the
+    founder can fix in sixty seconds.
+
+    Fires per message, so an active server produces these regularly and a dead
+    one produces none — which is the honest way to be more frequent. The answer
+    window is `config.RESPONSE_WINDOW_HOURS` (48), so a message only becomes a
+    provocation once it is genuinely past being answered in the normal course,
+    and `provoked_by` is that message's own timestamp.
+    """
+    cutoff = db.hours_ago(config.RESPONSE_WINDOW_HOURS)
+    row = db.one(
+        "SELECT m.created_at, m.content, c.name AS channel, "
+        "       COALESCE(mem.display_name, mem.username, 'someone who has since left') AS who, "
+        "       (mem.user_id IS NOT NULL) AS on_roster "
+        "FROM messages m "
+        "LEFT JOIN channels c ON c.guild_id=m.guild_id AND c.channel_id=m.channel_id "
+        "LEFT JOIN members mem ON mem.guild_id=m.guild_id AND mem.user_id=m.author_id "
+        "WHERE m.guild_id=? AND m.type IN (0, 19) AND COALESCE(mem.is_bot,0)=0 "
+        "  AND m.created_at > ? AND m.created_at < ? "
+        "  AND m.content IS NOT NULL AND LENGTH(m.content) > 3 "
+        "  AND NOT EXISTS ("
+        "     SELECT 1 FROM messages r "
+        "     LEFT JOIN members rm ON rm.guild_id=r.guild_id AND rm.user_id=r.author_id "
+        "     WHERE r.guild_id=m.guild_id AND r.channel_id=m.channel_id "
+        "       AND r.author_id <> m.author_id AND r.type IN (0, 19) "
+        "       AND COALESCE(rm.is_bot,0)=0 "
+        "       AND julianday(r.created_at) > julianday(m.created_at) "
+        "       AND julianday(r.created_at) <= julianday(m.created_at) + ?) "
+        "ORDER BY m.created_at DESC LIMIT 1",
+        (guild_id, since, cutoff, config.RESPONSE_WINDOW_HOURS / 24.0),
+    )
+    if not row:
+        return None
+    text, _n = probe._redact(row["content"])
+    finding = ("**%s** asked something in #%s on %s and still has no reply."
+               % (row["who"], row["channel"] or "?", row["created_at"][:10]))
+    prompt = "\n".join([
+        "# What happened",
+        "",
+        "%s wrote this in #%s on %s, and %d hours later nobody has replied:"
+        % (row["who"], row["channel"] or "?", row["created_at"][:10],
+           config.RESPONSE_WINDOW_HOURS),
+        "",
+        "  %s" % text[:400],
+        "",
+        "# Your question",
+        "",
+        "Tell him to answer this person, and say what you would answer. Not",
+        "\"engage with your community\" — the actual reply, or the one question",
+        "worth asking back. If the message needs no reply, say that plainly.",
+    ])
+    return Provocation("ignored", row["created_at"], prompt, None, (), finding)
 
 
 def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
@@ -497,6 +557,7 @@ def _from_drift(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Pro
 
 
 _GENERATORS = {
+    "ignored": _from_ignored,
     "backlog": _from_backlog,
     "verdict": _from_verdict,
     "life": _from_life,
