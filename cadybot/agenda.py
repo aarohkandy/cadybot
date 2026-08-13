@@ -184,8 +184,14 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
             "**%s** wrote in #%s on %s and nobody ever replied.%s"
             % (first["author"], first["channel"] or "?", (first["at"] or "")[:10], gone)
         )
-        if ignored.rows > 1:
-            finding += " %d messages in this server's history were never answered." % ignored.rows
+        # The TOTAL, not the number the LIMIT happened to return. This line
+        # went out to the founder reading "4 messages in this server's history
+        # were never answered" on a server where the true answer is 17, in the
+        # sentence this file calls the fact decided by SQL.
+        total = ignored.facts.get("total") or ignored.rows
+        if total > 1:
+            finding += (" %d messages in this server's history were never "
+                        "answered." % total)
 
     prompt = "\n".join([
         "# What happened",
@@ -747,6 +753,10 @@ def unsaid(guild_id: int, within_hours: int = 48) -> Optional[Dict[str, Any]]:
         "SELECT * FROM journal WHERE guild_id=? AND outcome='thought' "
         "AND surfaced_at IS NULL AND to_founder IS NOT NULL AND to_founder <> '' "
         "AND wanted_telling=1 AND (unverified IS NULL OR unverified IN ('', '[]')) "
+        # Only kinds that could ever be said. A `context` thought is never
+        # surfaceable, so holding one here head-of-line blocks the single replay
+        # slot forever and a real finding queues behind it permanently.
+        "AND kind IN (%s) " % ",".join("'%s'" % k for k in SURFACEABLE) +
         # A thought carrying a SQL-written finding outranks one that is only
         # prose, however recent. Otherwise a generic reflection generated
         # minutes later buries the one that actually found something.

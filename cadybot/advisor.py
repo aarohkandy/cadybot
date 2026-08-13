@@ -562,9 +562,15 @@ _CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z])")
 # them on 2026-05-09" was flagged for inventing 2026, 05 and 09, and suppressed.
 # Citing when something happened is the opposite of making a number up.
 _DATEISH = re.compile(
+    # ISO date, optionally with a time.
     r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?"
-    r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b"
-    r"|\b\d{1,2}:\d{2}\b"
+    # A slashed date needs all three parts. "3/4" is far more likely to be a
+    # ratio the model invented than a date, and stripping it hid two figures at
+    # once — the pattern meant to stop false positives was creating false
+    # negatives in the check that matters more.
+    r"|\b\d{1,2}/\d{1,2}/\d{2,4}\b"
+    # A clock time only when it is one: 24-hour, and not a bare pair of counts.
+    r"|\b(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b"
 )
 
 

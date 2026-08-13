@@ -242,7 +242,7 @@ def _channel_map(conn, guild_id, days=90):
         lines.append("  [%2d] %-34s %-13s %4d msgs  %2d authors  last %s"
                      % (i, _clip(r["name"] or "?", 34), r["kind"], r["n_all"],
                         r["authors"], (r["last_at"] or "never")[:10]))
-    facts = {"channels": listed, "window_days": days, "count": len(listed)}
+    facts = {"channels": listed, "count": len(listed)}
     body = "\n".join(
         ["every channel and thread, with its message count. use the [ref] number "
          "with channel_messages to read one."] + lines
@@ -283,7 +283,7 @@ def _channel_messages(conn, guild_id, ref=1, limit=12):
                                        " [bot]" if r["is_bot"] else "",
                                        _clip(text)))
     facts = {
-        "channel": target["name"], "ref": ref, "count": len(rows),
+        "channel": target["name"], "count": len(rows),
         "first_at": rows[0]["created_at"] if rows else None,
         "last_at": rows[-1]["created_at"] if rows else None,
         "redactions": redactions,
@@ -299,6 +299,9 @@ def _messages_search(conn, guild_id, term="", days=365, limit=8):
     if not (term or "").strip():
         return _error("messages_search", {"term": term},
                       "term must be a non-empty word to search for.")
+    # ESCAPE, because '%' and '_' are LIKE wildcards: searching for "100%"
+    # otherwise matches every message in the server and reports it as a hit.
+    safe = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
         "SELECT m.created_at, c.name AS channel, "
         "       COALESCE(mem.display_name, mem.username, "
@@ -308,9 +311,10 @@ def _messages_search(conn, guild_id, term="", days=365, limit=8):
         "LEFT JOIN channels c ON c.guild_id = m.guild_id AND c.channel_id = m.channel_id "
         "LEFT JOIN members mem ON mem.guild_id = m.guild_id AND mem.user_id = m.author_id "
         "WHERE m.guild_id = ? AND m.type IN " + HUMAN_TYPES + " "
-        "  AND m.created_at >= ? AND LOWER(m.content) LIKE '%' || LOWER(?) || '%' "
+        "  AND m.created_at >= ? "
+        "  AND LOWER(m.content) LIKE '%' || LOWER(?) || '%' ESCAPE '\\' "
         "ORDER BY m.created_at DESC LIMIT ?",
-        (guild_id, _days_ago(days), term, limit),
+        (guild_id, _days_ago(days), safe, limit),
     ).fetchall()
     quotes, redactions = [], 0
     for r in rows:
@@ -319,8 +323,13 @@ def _messages_search(conn, guild_id, term="", days=365, limit=8):
         quotes.append("%s #%s %s%s: %s" % (r["created_at"][:16], r["channel"] or "?",
                                            r["author"], " [bot]" if r["is_bot"] else "",
                                            _clip(text)))
+    # `term` and `days` came from the model. Echoing them into `facts` — which
+    # advisor mines for citable figures — let it whitelist any number by
+    # searching for it: messages_search(term="4700 signups") returns nothing and
+    # makes "4700" quotable. They stay on Finding.args, which the verifier does
+    # not read, and which the footer already shows.
     facts = {
-        "term": term, "count": len(rows), "window_days": days,
+        "shown": len(rows),
         "authors": sorted(set(r["author"] for r in rows)),
         "channels": sorted(set(r["channel"] for r in rows if r["channel"])),
         "first_at": rows[-1]["created_at"] if rows else None,
@@ -421,11 +430,29 @@ def _unanswered_history(conn, guild_id, limit=8):
                          "" if r["on_roster"] else " (has since left)", _clip(text)))
         listed.append({"author": r["author"], "channel": r["channel"],
                        "at": r["created_at"], "on_roster": bool(r["on_roster"])})
-    facts = {"count": len(rows), "ignored": listed, "redactions": redactions}
+    total = _total(conn,
+        "SELECT COUNT(*) FROM messages m "
+        "LEFT JOIN members mem ON mem.guild_id=m.guild_id AND mem.user_id=m.author_id "
+        "WHERE m.guild_id = ? AND m.type IN " + HUMAN_TYPES + " "
+        "  AND COALESCE(mem.is_bot, 0) = 0 "
+        "  AND m.content IS NOT NULL AND LENGTH(m.content) > 3 "
+        "  AND NOT EXISTS ("
+        "     SELECT 1 FROM messages r "
+        "     LEFT JOIN members rm ON rm.guild_id=r.guild_id AND rm.user_id=r.author_id "
+        "     WHERE r.guild_id = m.guild_id AND r.channel_id = m.channel_id "
+        "       AND r.author_id <> m.author_id AND r.type IN " + HUMAN_TYPES + " "
+        "       AND COALESCE(rm.is_bot, 0) = 0 "
+        "       AND julianday(r.created_at) > julianday(m.created_at) "
+        "       AND julianday(r.created_at) <= julianday(m.created_at) + 2.0)",
+        (guild_id,))
+    facts = {"shown": len(rows), "total": total, "ignored": listed,
+             "redactions": redactions}
     body = ("messages from members that NOBODY ever replied to, newest first — "
             "a reply from any other human within 48h counts as answered:\n"
             + "\n".join("  " + q for q in quotes)) if quotes else \
            "confirmed empty: every member message got a reply from someone."
+    if len(rows) < total:
+        body += "\n  showing %d of %d." % (len(rows), total)
     return Finding("", "unanswered_history", {"limit": limit}, len(rows),
                    facts, quotes, body)
 
@@ -526,6 +553,18 @@ _register("open_bets",
 
 
 # --- dispatch ---------------------------------------------------------------
+
+
+def _total(conn, sql: str, params) -> int:
+    """The unlimited count behind a capped SELECT.
+
+    `len(rows)` from a statement ending in LIMIT ? is a function of the argument
+    the model chose, not of the data — and it was being handed to the model as a
+    figure computed by SQL. On the live server the true number of never-answered
+    messages is 17; `unanswered_history(limit=4)` reported 4, and agenda.py
+    printed that as "4 messages in this server's history were never answered".
+    """
+    return conn.execute(sql, params).fetchone()[0]
 
 
 def _days_ago(days: int) -> str:

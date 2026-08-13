@@ -996,6 +996,30 @@ db.connect().execute(
 check("61c a finding outranks a newer generic thought",
       (agenda.unsaid(gid) or {})["kind"] == "backlog")
 
+# 62: the date exemption was stripping any d/d or d:dd pair, which hid two
+# invented figures at a time — a false-positive fix creating false negatives in
+# the check that matters more.
+check("62 a real date still passes",
+      not advisor.verify_evidence(_snap52, "nobody answered on 2026-05-25 at 17:46"))
+check("62b but a ratio is not a date",
+      advisor.verify_evidence(_snap52, "engagement is 3/4 of last month") == ["3", "4"])
+
+# 63: a context thought can never be surfaced, so holding one in the single
+# replay slot blocks every real finding behind it forever.
+gid = fresh(900910)
+for kind, finding in (("context", None), ("backlog", "**someone** was ignored.")):
+    db.connect().execute(
+        "INSERT INTO journal (guild_id, kind, provoked_by, about_ref, started_at, "
+        "self_prompt, outcome, to_founder, note_to_self, watch_metric, unverified, "
+        "wanted_telling, finding) VALUES (?,?,?,?,?,?, 'thought', ?, '', ?, '[]', 1, ?)",
+        (gid, kind, ago(hours=2 if kind == "context" else 3), None,
+         ago(hours=1 if kind == "context" else 3), "sp", "text",
+         "activity.messages_7d", finding))
+held = agenda.unsaid(gid)
+check("63 a thought that can never be said does not block the queue",
+      held is not None and held["kind"] == "backlog",
+      held["kind"] if held else None)
+
 # ------------------------------------------------------------------- report
 
 print()

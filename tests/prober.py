@@ -198,6 +198,46 @@ check("18 contact details are masked before a model sees them",
       "a@b.com" not in masked and "https://x.co" not in masked and "12345678" not in masked
       and n == 3, masked)
 
+# --- what the adversarial review found -------------------------------------
+
+# 19: a model can whitelist any figure by searching for it, if its own argument
+# is echoed into the citable set. messages_search("4700 signups") returns zero
+# rows and used to make "4700" quotable.
+f = probe.run(G, "messages_search", {"term": "4700 signups"})
+check("19 a search term cannot launder a number into evidence",
+      "4700" not in advisor._numeric_literals(f.facts),
+      sorted(advisor._numeric_literals(f.facts)))
+f = probe.run(G, "channel_map", {"days": 87})
+check("19b nor can a window argument",
+      "87" not in advisor._numeric_literals(f.facts))
+
+# 20: '%' and '_' are LIKE wildcards. Searching for "100%" matched everything.
+for i in range(3):
+    conn.execute("INSERT OR REPLACE INTO messages (guild_id, channel_id, message_id,"
+                 " author_id, created_at, content, type) VALUES (?,?,?,?,?,?,0)",
+                 (G, G + 1, 77000 + i, G + 7,
+                  (now - timedelta(days=i)).isoformat(), "no percent here"))
+check("20 a wildcard in the term does not match everything",
+      probe.run(G, "messages_search", {"term": "%"}).rows == 0)
+check("20b and an underscore does not either",
+      probe.run(G, "messages_search", {"term": "_"}).rows == 0)
+
+# 21: a count from a statement ending in LIMIT ? is a function of the argument,
+# not of the data. It went out to the founder as "4 messages ... were never
+# answered" on a server where the answer was 17.
+for i in range(6):
+    conn.execute("INSERT OR REPLACE INTO messages (guild_id, channel_id, message_id,"
+                 " author_id, created_at, content, type) VALUES (?,?,?,?,?,?,0)",
+                 (G, G + 1, 78000 + i, G + 7,
+                  (now - timedelta(days=200 + i)).isoformat(), "ignored message %d" % i))
+small = probe.run(G, "unanswered_history", {"limit": 2})
+big = probe.run(G, "unanswered_history", {"limit": 12})
+check("21 the reported total does not move with the limit",
+      small.facts["total"] == big.facts["total"], (small.facts, big.facts))
+check("21b and the rows shown are still capped",
+      small.facts["shown"] <= 2 < small.facts["total"], small.facts)
+check("21c and the body says so", "showing 2 of" in small.body, small.body[-80:])
+
 print()
 print("%d passed, %d failed" % (len(PASSED), len(FAILED)))
 for n in FAILED:
