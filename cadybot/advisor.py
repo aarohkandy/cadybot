@@ -560,6 +560,18 @@ def _normalise(token: str) -> str:
 # phrase this founder's advisor could ever use silenced it permanently.
 _CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z])")
 
+# Dates are not statistics. `_numeric_literals` already refuses to mine a
+# timestamp on the snapshot side, for the stated reason that six arbitrary
+# two-digit numbers would make most small integers "known" — but the text side
+# had no matching rule, so a reflection that correctly said "nobody answered
+# them on 2026-05-09" was flagged for inventing 2026, 05 and 09, and suppressed.
+# Citing when something happened is the opposite of making a number up.
+_DATEISH = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?"
+    r"|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b"
+    r"|\b\d{1,2}:\d{2}\b"
+)
+
 
 def verify_cited(known: Set[str], text: Optional[str]) -> List[str]:
     """Numbers cited in `text` that are not in `known`.
@@ -571,7 +583,7 @@ def verify_cited(known: Set[str], text: Optional[str]) -> List[str]:
     if not text:
         return []
     missing: List[str] = []
-    for token in _CITED_NUMERAL.findall(text):
+    for token in _CITED_NUMERAL.findall(_DATEISH.sub(" ", text)):
         normalised = _normalise(token)
         if normalised not in known and normalised not in missing:
             missing.append(normalised)

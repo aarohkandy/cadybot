@@ -878,6 +878,11 @@ for phrase in ("go participate in r/3Dprinting and Printables",
     if flagged:
         break
 check("52 a digit inside a word is not a cited number", not flagged, (phrase, flagged))
+# 52c: a reflection that correctly said "nobody answered them on 2026-05-09"
+# was flagged for inventing 2026, 05 and 09, and suppressed. Citing when
+# something happened is the opposite of making a number up.
+check("52c a date is not an invented statistic",
+      not advisor.verify_evidence(_snap52, "nobody answered them on 2026-05-09 at 17:46"))
 check("52b but a genuinely invented figure still is",
       advisor.verify_evidence(_snap52, "engagement is down 73% this month") == ["73"])
 

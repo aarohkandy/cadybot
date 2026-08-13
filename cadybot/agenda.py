@@ -155,8 +155,12 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
     # suggestion to go and find some.
     blocks = []
     numbers: List[str] = []
-    for name, args in (("roster_authors", {}), ("table_freshness", {}),
-                       ("channel_map", {"days": 3650})):
+    # unanswered_history first, and deliberately: an ignored message is one
+    # named person who wanted something and did not get it, which is the most
+    # actionable artefact a small server produces. Counts go after it, because a
+    # model handed counts first writes about counts.
+    for name, args in (("unanswered_history", {}), ("roster_authors", {}),
+                       ("table_freshness", {})):
         finding = probe.run(guild_id, name, args)
         if finding.error:
             continue
@@ -176,12 +180,21 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
         "",
         "# Your question",
         "",
-        "What is true about this server that the founder probably does not know,",
-        "and that he could only learn by someone reading the actual messages? Name",
-        "the single most useful one. A specific person who did something specific",
-        "beats any summary. If the honest answer is that the history contains",
-        "nothing he does not already know, say that instead — but say it having",
-        "looked.",
+        "What is true about this server that the founder probably does not know?",
+        "",
+        "Rules for the answer, in order:",
+        "1. If somebody asked for something and nobody answered them, that is the",
+        "   answer. Say who, say when, say what they asked for, and say whether",
+        "   they are still here. One ignored person outranks every statistic on",
+        "   this page.",
+        "2. Otherwise, if the records show something structurally surprising — a",
+        "   bot wrote most of the messages, people wrote and left before anything",
+        "   was recording, a whole class of event has never been collected — lead",
+        "   with that.",
+        "3. Only if neither holds, fall back on advice.",
+        "",
+        "Do not open with what he already knows. He knows the server is quiet. He",
+        "knows he has not posted. Telling him again is worse than saying nothing.",
     ])
     return Provocation("backlog", row["at"], prompt, None, tuple(dict.fromkeys(numbers)))
 

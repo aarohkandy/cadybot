@@ -376,6 +376,59 @@ def _roster_authors(conn, guild_id, days=3650):
     return Finding("", "roster_authors", {"days": days}, len(rows), facts, [], body)
 
 
+def _unanswered_history(conn, guild_id, limit=8):
+    """Member messages, over all time, that nobody ever answered.
+
+    snapshot.unanswered_questions exists but only looks back 30 days, which on a
+    server whose last message is two months old returns nothing. The founder's
+    whole history is exactly where the unanswered ones are, and an ignored
+    question is the single most actionable artefact a small server produces: it
+    is one named person who wanted something and did not get it.
+
+    "Answered" is deliberately generous — any later message from a different
+    human in the same channel within 48 hours. A generous definition means
+    anything that survives it really was ignored.
+    """
+    rows = conn.execute(
+        "SELECT m.created_at, m.content, c.name AS channel, "
+        "       COALESCE(mem.display_name, mem.username, "
+        "                'left-before-ingest-' || m.author_id) AS author, "
+        "       (mem.user_id IS NOT NULL) AS on_roster "
+        "FROM messages m "
+        "LEFT JOIN channels c ON c.guild_id=m.guild_id AND c.channel_id=m.channel_id "
+        "LEFT JOIN members mem ON mem.guild_id=m.guild_id AND mem.user_id=m.author_id "
+        "WHERE m.guild_id = ? AND m.type IN " + HUMAN_TYPES + " "
+        "  AND COALESCE(mem.is_bot, 0) = 0 "
+        "  AND m.content IS NOT NULL AND LENGTH(m.content) > 3 "
+        "  AND NOT EXISTS ("
+        "     SELECT 1 FROM messages r "
+        "     LEFT JOIN members rm ON rm.guild_id=r.guild_id AND rm.user_id=r.author_id "
+        "     WHERE r.guild_id = m.guild_id AND r.channel_id = m.channel_id "
+        "       AND r.author_id <> m.author_id AND r.type IN " + HUMAN_TYPES + " "
+        "       AND COALESCE(rm.is_bot, 0) = 0 "
+        "       AND julianday(r.created_at) > julianday(m.created_at) "
+        "       AND julianday(r.created_at) <= julianday(m.created_at) + 2.0) "
+        "ORDER BY m.created_at DESC LIMIT ?",
+        (guild_id, limit),
+    ).fetchall()
+    quotes, listed, redactions = [], [], 0
+    for r in rows:
+        text, n = _redact(r["content"])
+        redactions += n
+        quotes.append("%s #%s %s%s: %s"
+                      % (r["created_at"][:10], r["channel"] or "?", r["author"],
+                         "" if r["on_roster"] else " (has since left)", _clip(text)))
+        listed.append({"author": r["author"], "channel": r["channel"],
+                       "at": r["created_at"], "on_roster": bool(r["on_roster"])})
+    facts = {"count": len(rows), "ignored": listed, "redactions": redactions}
+    body = ("messages from members that NOBODY ever replied to, newest first — "
+            "a reply from any other human within 48h counts as answered:\n"
+            + "\n".join("  " + q for q in quotes)) if quotes else \
+           "confirmed empty: every member message got a reply from someone."
+    return Finding("", "unanswered_history", {"limit": limit}, len(rows),
+                   facts, quotes, body)
+
+
 def _open_bets(conn, guild_id):
     # Half these columns are added by scorecard.ensure_schema, not by db.SCHEMA,
     # so on a database where that has never run they simply do not exist. probe
@@ -458,6 +511,13 @@ _register("roster_authors",
           "Everyone who has ever posted, with volume, whether they are a bot, "
           "and whether they are still on the member roster.",
           (Param("days", "int", default=3650, low=1, high=3650),), _roster_authors)
+
+_register("unanswered_history",
+          "Member messages, across the whole history, that nobody ever replied "
+          "to. An ignored question is one named person who wanted something and "
+          "did not get it — the most actionable thing a small server produces.",
+          (Param("limit", "int", default=8, low=1, high=PROBE_MAX_ROWS),),
+          _unanswered_history)
 
 _register("open_bets",
           "The recommendations cadybot has already made here, and their verdicts.",
