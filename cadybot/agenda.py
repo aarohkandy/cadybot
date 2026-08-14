@@ -58,12 +58,14 @@ QUIET_KEY = "agenda_quiet_until"
 # Precedence. First match wins, and there is no scoring: a ranking formula over
 # hand-tuned weights was tried in design and froze solid after one cycle, which
 # is what ranking formulas over hand-tuned weights do.
-KINDS = ("ignored", "backlog", "verdict", "life", "joined", "context", "drift")
+KINDS = ("ignored", "backlog", "verdict", "life", "joined", "context",
+         "drift", "digest")
 
 # Which kinds may ever reach the founder unprompted. `context` is deliberately
 # absent: reacting to the founder editing his own notes file is thinking worth
 # recording and never an interruption worth making.
-SURFACEABLE = ("ignored", "backlog", "verdict", "life", "joined", "drift")
+SURFACEABLE = ("ignored", "backlog", "verdict", "life", "joined", "drift",
+               "digest")
 
 # The one generator allowed to point at a timestamp older than the agenda.
 # Everything else treats the past as history the founder has already lived
@@ -124,10 +126,16 @@ class Provocation:
 # --- installation ----------------------------------------------------------
 
 
-def installed_at(guild_id: int) -> str:
-    """When this guild's agenda opened, writing it on first ask."""
+def installed_at(guild_id: int, create: bool = True) -> Optional[str]:
+    """When this guild's agenda opened, writing it on first ask.
+
+    `create=False` looks without touching. The mark decides forever what counts
+    as history rather than news, so writing it is the most consequential thing
+    a first call can do — and `cadybot reflect`, documented as reading only, was
+    doing exactly that on any guild the desk had not run for yet.
+    """
     stamp = db.get_setting(guild_id, INSTALLED_KEY)
-    if not stamp:
+    if not stamp and create:
         stamp = db.now()
         db.set_setting(guild_id, INSTALLED_KEY, stamp)
     return stamp
@@ -137,6 +145,82 @@ def installed_at(guild_id: int) -> str:
 #
 # Each returns a Provocation or None. Each reads its timestamp out of storage.
 
+
+
+
+def _from_digest(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
+    """The day is over and nothing else got said. Say something anyway.
+
+    Last in precedence, and the only generator that is not about a surprise.
+    Simulating sixty days of the live server produced exactly one message, and a
+    *healthy* server produced fewer than a struggling one, because everything
+    getting answered means nothing is ever wrong. Purely event-driven turned out
+    to be the wrong shape: a founder who hears from his advisor once in two
+    months does not have an advisor.
+
+    This is still not the clock. `provoked_by` is yesterday's ledger close — a
+    row, written by listener.hourly_facts, that exists only if the collector
+    actually ran. So a day cadybot was down produces no digest and no false
+    "nothing happened", and the UNIQUE key gives one per day for free.
+
+    It fires only when nothing else has been delivered that day, so on an active
+    server the real findings crowd it out and it never doubles up.
+    """
+    day = ledger.day_offset(1)
+    closed = db.one(
+        "SELECT day FROM ledger WHERE guild_id=? AND day=? LIMIT 1", (guild_id, day)
+    )
+    if not closed:
+        return None                      # the collector did not run; say nothing
+    if db.deliveries_since(guild_id, db.hours_ago(20)):
+        return None                      # he has already heard from us today
+
+    moved = []
+    for metric in ledger.LEDGER_METRICS:
+        before = ledger.value_on(guild_id, ledger.day_offset(8), metric)
+        after = ledger.value_on(guild_id, day, metric)
+        if before is None or after is None or before == after:
+            continue
+        moved.append("%s %s -> %s" % (metric, _fmt(before), _fmt(after)))
+
+    # A day where something moved is worth a daily note. A day where nothing
+    # did is worth one every few days — simulating sixty days of the live server
+    # with an unconditional digest produced fifty-nine consecutive messages
+    # saying "nothing moved", which is the noise failure this whole design
+    # exists to avoid, just wearing a schedule.
+    if not moved and db.deliveries_since(
+        guild_id, db.days_ago(config.DIGEST_QUIET_DAYS), "thought"
+    ):
+        return None
+
+    open_row = scorecard.open_row(guild_id)
+    if moved:
+        finding = "Week on week: " + "; ".join(moved[:3]) + "."
+    elif open_row:
+        finding = ("Nothing moved this week. %s is still open — day %.0f of %d."
+                   % (open_row["ref"], open_row["age_days"],
+                      open_row["horizon_days"] or config.RECOMMENDATION_HORIZON_DAYS))
+    else:
+        finding = "Nothing moved this week, and nothing is outstanding."
+
+    prompt = "\n".join([
+        "# Where things stand",
+        "",
+        "Nothing in particular happened. This is the daily check-in, and the",
+        "numbers below are the whole of what changed since a week ago:",
+        "",
+        "  " + ("\n  ".join(moved) if moved else "nothing measurable moved"),
+        "",
+        "# Your question",
+        "",
+        "One or two sentences. If something moved, say what you make of it. If",
+        "nothing did — which is the normal case on a small server — say that",
+        "plainly and say what you are watching for. Do not manufacture an",
+        "insight and do not repeat advice he has already had; a short honest",
+        "\"still quiet, here is the one thing I am waiting to see\" is exactly",
+        "right and is what he is paying for.",
+    ])
+    return Provocation("digest", day + "T00:00:00+00:00", prompt, None, (), finding)
 
 
 def _from_ignored(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
@@ -607,13 +691,15 @@ _GENERATORS = {
     "joined": _from_join,
     "context": _from_context,
     "drift": _from_drift,
+    "digest": _from_digest,
 }
 
 
 # --- selection -------------------------------------------------------------
 
 
-def next_provocation(guild_id: int, snap: Dict[str, Any]) -> Optional[Provocation]:
+def next_provocation(guild_id: int, snap: Dict[str, Any],
+                     create_mark: bool = True) -> Optional[Provocation]:
     """The one thing worth thinking about, or None. Almost always None.
 
     Both time filters are ordinary `continue`s rather than assertions, and that
@@ -633,7 +719,9 @@ def next_provocation(guild_id: int, snap: Dict[str, Any]) -> Optional[Provocatio
     tests/thinker.py runs it against every generator on controlled fixtures.
     """
     started_at = db.now()
-    installed = installed_at(guild_id)
+    installed = installed_at(guild_id, create=create_mark)
+    if installed is None:
+        return None      # nothing is installed and we were told not to install
 
     for kind in KINDS:
         prov = _GENERATORS[kind](guild_id, snap, installed)

@@ -170,6 +170,11 @@ SURFACE_WINDOW_UTC = (12, 24)
 
 # A note cadybot leaves itself rides into a later brief. Both numbers exist so
 # carried context cannot grow with uptime.
+# How long the daily check-in waits before repeating itself with nothing new.
+# A day where a number moved is worth a note; a day where none did is worth one
+# every few days, or the check-in becomes the thing he mutes.
+DIGEST_QUIET_DAYS = _int("CADYBOT_DIGEST_QUIET_DAYS", 3)
+
 NOTE_TTL_DAYS = 60
 NOTES_CARRIED = 3
 

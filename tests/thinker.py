@@ -216,7 +216,14 @@ gid = fresh()
 member(gid, 1, name="human")
 message(gid, 10, 1, ago(days=400))
 close_day(gid, ledger.day_offset(1), "activity.messages_30d", 0.0)
-check("8  history is not news", agenda.next_provocation(gid, empty_snap()) is None)
+# The daily check-in fires whenever nothing else does, so these assert on the
+# generator under test rather than on total silence.
+def kind_of(gid):
+    p = agenda.next_provocation(gid, empty_snap())
+    return p.kind if p else None
+
+
+check("8  history is not news", kind_of(gid) != "life", kind_of(gid))
 
 gid = fresh()
 db.connect().execute(
@@ -306,7 +313,7 @@ close_day(gid, ledger.day_offset(1), "activity.messages_30d", 0.0)
 message(gid, 40, 1, iso(datetime.now(timezone.utc) + timedelta(seconds=30)))
 try:
     skewed = agenda.next_provocation(gid, empty_snap())
-    ok10c = skewed is None
+    ok10c = skewed is None or skewed.kind != "life"
     detail = skewed.kind if skewed else ""
 except AssertionError as exc:
     ok10c, detail = False, "crashed: %s" % exc
@@ -336,7 +343,7 @@ gid = fresh()
 member(gid, 1, name="human")
 close_day(gid, ledger.day_offset(1), "activity.messages_30d", 40.0)
 message(gid, 21, 1, ago(hours=5))
-check("11c a busy server is not woken", agenda.next_provocation(gid, empty_snap()) is None)
+check("11c a busy server is not woken", kind_of(gid) != "life", kind_of(gid))
 
 # 12: the ordering test — today's close must not erase yesterday's evidence
 gid = fresh()
@@ -577,8 +584,13 @@ first = agenda.next_provocation(gid, empty_snap())
 check("32 the unread history is worth exactly one thought",
       first is not None and first.kind == "backlog", first.kind if first else None)
 agenda.open_attempt(gid, first)
-quiet = all(agenda.next_provocation(gid, empty_snap()) is None for _ in range(120))
-check("32b and then a month of ticks produces none", quiet)
+def no_findings(gid, n=120):
+    """No further discovery — the daily check-in is expected and does not count."""
+    return all((agenda.next_provocation(gid, empty_snap()) or
+                type("x", (), {"kind": "digest"})).kind == "digest" for _ in range(n))
+
+
+check("32b and then a month of ticks finds nothing new", no_findings(gid))
 
 db.connect().execute(
     "UPDATE recommendations SET verdict='not_attempted', verdict_at=?, verdict_current=0.0 "
@@ -588,15 +600,13 @@ db.connect().execute(
 prov = agenda.next_provocation(gid, empty_snap())
 check("33 closing the bet provokes exactly once", prov is not None and prov.kind == "verdict")
 agenda.open_attempt(gid, prov)
-check("33b and then goes quiet again",
-      all(agenda.next_provocation(gid, empty_snap()) is None for _ in range(120)))
+check("33b and then finds nothing new", no_findings(gid))
 
 message(gid, 9999, 1, ago(hours=1))
 prov = agenda.next_provocation(gid, empty_snap())
 check("34 one message wakes it, once", prov is not None and prov.kind == "life")
 agenda.open_attempt(gid, prov)
-check("34b and only once",
-      all(agenda.next_provocation(gid, empty_snap()) is None for _ in range(120)))
+check("34b and only once", no_findings(gid))
 
 # ------------------------------------------------------------------ ledger
 
@@ -1112,6 +1122,38 @@ left = db.scalar(
     "SELECT COUNT(*) FROM journal WHERE guild_id=? AND (finding IS NOT NULL "
     "OR to_founder IS NOT NULL)", (gid,))
 check("68 purging a member clears what the desk quoted of them", left == 0, left)
+
+# 69: the daily check-in. Purely event-driven produced one message in sixty
+# simulated days on the live server's shape, and a *healthy* server produced
+# fewer than a struggling one, because everything getting answered means nothing
+# is ever wrong.
+gid = fresh(900950)
+close_day(gid, ledger.day_offset(8), "activity.messages_7d", 2.0)
+close_day(gid, ledger.day_offset(1), "activity.messages_7d", 9.0)
+p69 = agenda.next_provocation(gid, empty_snap())
+check("69 a week-on-week move is worth a daily note",
+      p69 is not None and p69.kind == "digest", p69.kind if p69 else None)
+check("69b and it says what moved, from the ledger",
+      p69 is not None and "activity.messages_7d" in (p69.finding or ""),
+      p69.finding if p69 else None)
+
+# It is still not the clock: no ledger close means the collector did not run,
+# and a day cadybot was down must not produce a confident "nothing happened".
+gid = fresh(900951)
+check("69c no ledger close, no check-in",
+      (agenda.next_provocation(gid, empty_snap()) or type("x", (), {"kind": None})).kind
+      != "digest")
+
+# And it backs off rather than repeating itself into the ground.
+gid = fresh(900952)
+close_day(gid, ledger.day_offset(1), "activity.messages_7d", 0.0)
+close_day(gid, ledger.day_offset(8), "activity.messages_7d", 0.0)
+first = agenda.next_provocation(gid, empty_snap())
+check("69d a quiet day still checks in", first is not None and first.kind == "digest")
+db.record_delivery(gid, "thought", 100)
+check("69e but not again tomorrow with nothing new",
+      (agenda.next_provocation(gid, empty_snap()) or type("x", (), {"kind": None})).kind
+      != "digest")
 
 # ------------------------------------------------------------------- report
 

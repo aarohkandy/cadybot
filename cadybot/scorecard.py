@@ -417,8 +417,8 @@ def pre_register(
             "INSERT INTO recommendations "
             "(guild_id, created_at, headline, action, evidence, metric, prediction, "
             " direction, horizon_days, guardrail_metric, baseline, threshold, "
-            " guardrail_baseline, guardrail_floor, baseline_json, issued_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " guardrail_baseline, guardrail_floor, baseline_json, issued_by, play) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 guild_id,
                 stamp,
@@ -436,6 +436,10 @@ def pre_register(
                 guard_floor,
                 baselines,
                 source,
+                # Which catalogue play this was. plays.py already constrains the
+                # choice to ones whose precondition holds; recording it is what
+                # makes "which plays actually work here" answerable later.
+                rec.get("play") or None,
             ),
         )
         ids.append(int(cursor.lastrowid))

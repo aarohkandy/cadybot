@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     metric        TEXT,
     prediction    TEXT,
     reviewed_at   TEXT,
-    outcome       TEXT
+    outcome       TEXT,
+    play          TEXT                    -- which catalogue play this was
 );
 CREATE INDEX IF NOT EXISTS ix_recs ON recommendations (guild_id, created_at);
 
@@ -319,6 +320,7 @@ MIGRATIONS: List[Tuple[str, str, str]] = [
     ("journal", "wanted_telling", "INTEGER NOT NULL DEFAULT 0"),
     ("journal", "attempts", "INTEGER NOT NULL DEFAULT 1"),
     ("journal", "finding", "TEXT"),
+    ("recommendations", "play", "TEXT"),
 ]
 
 # Settings row marking the one-off phantom sweep as already done. guild_id 0 is

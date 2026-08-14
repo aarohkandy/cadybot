@@ -133,7 +133,7 @@ def preview(guild_id: int) -> Dict[str, Any]:
     to be run repeatedly on a live server to watch the desk decline to act.
     """
     snap = snapshot.build(guild_id)
-    prov = agenda.next_provocation(guild_id, snap)
+    prov = agenda.next_provocation(guild_id, snap, create_mark=False)
     spent = db.scalar(
         "SELECT COUNT(*) FROM journal WHERE guild_id=? AND started_at>=?",
         (guild_id, db.hours_ago(24)),
@@ -147,6 +147,11 @@ def preview(guild_id: int) -> Dict[str, Any]:
         "would_surface": None,
         "why": "nothing has happened that I have not already thought about",
     }
+    if agenda.installed_at(guild_id, create=False) is None:
+        out["why"] = ("the desk has not started on this server yet — it begins "
+                      "on the first scheduled pass, and everything before that "
+                      "is history rather than news")
+        return out
     if prov is None:
         return out
     allowed, why = agenda.may_surface(guild_id, prov)
