@@ -88,6 +88,12 @@ JOIN_BURST_DAYS = 2
 # merits and wrong for one that failed because ollama was restarting.
 MAX_ATTEMPTS = 2
 
+# A ceiling on any lookup run from the desk. unanswered_history carries a
+# correlated NOT EXISTS over messages, which is quadratic in channel size; on a
+# busy server an unbounded one could outlast the whole pass. probe.run's own
+# deadline is optional and the desk was not passing one.
+PROBE_DEADLINE_S = 20
+
 # Must match advisor._NUMERAL, which is what verify_evidence tokenises with.
 _NUMERAL = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -228,14 +234,15 @@ def _from_backlog(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[P
     # model handed counts first writes about counts.
     for name, args in (("unanswered_history", {}), ("roster_authors", {}),
                        ("table_freshness", {})):
-        finding = probe.run(guild_id, name, args)
+        finding = probe.run(guild_id, name, args, deadline_s=PROBE_DEADLINE_S)
         if finding.error:
             continue
         blocks.append("## %s\n%s" % (name, finding.body[:900]))
         numbers.extend(_numerals(*[v for v in _flat_numbers(finding.facts)]))
 
     # The headline fact, decided by SQL rather than by whoever is reading.
-    ignored = probe.run(guild_id, "unanswered_history", {"limit": 4})
+    ignored = probe.run(guild_id, "unanswered_history", {"limit": 4},
+                        deadline_s=PROBE_DEADLINE_S)
     finding = None
     if ignored.rows and ignored.facts.get("ignored"):
         first = ignored.facts["ignored"][0]
@@ -415,10 +422,15 @@ def _from_life(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Prov
 
 def _from_join(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Provocation]:
     """Someone joined, and nobody had for a fortnight."""
+    # A bot joining is an integration being added, not somebody arriving
+    # somewhere quiet — and it would have produced "one person arrived, what
+    # would keep them here in a month" about a webhook.
     row = db.one(
-        "SELECT id, user_id, at, invite_code FROM member_events "
-        "WHERE guild_id=? AND event='join' AND at > ? "
-        "ORDER BY at DESC LIMIT 1",
+        "SELECT e.id, e.user_id, e.at, e.invite_code FROM member_events e "
+        "LEFT JOIN members m ON m.guild_id = e.guild_id AND m.user_id = e.user_id "
+        "WHERE e.guild_id=? AND e.event='join' AND e.at > ? "
+        "  AND COALESCE(m.is_bot, 0) = 0 "
+        "ORDER BY e.at DESC LIMIT 1",
         (guild_id, since),
     )
     if not row:
@@ -442,12 +454,26 @@ def _from_join(guild_id: int, snap: Dict[str, Any], since: str) -> Optional[Prov
     )
     if prior:
         return None  # joins are routine here; not news
+    # How many arrived together. The drought window deliberately ignores the
+    # last JOIN_BURST_DAYS so a shared link is one arrival rather than several
+    # cancelling each other — but the sentence then claimed "nobody had joined
+    # in the 14 days before that" about the third of three people who joined
+    # that afternoon, which is false and reads as false.
+    burst = db.scalar(
+        "SELECT COUNT(*) FROM member_events e "
+        "LEFT JOIN members m ON m.guild_id = e.guild_id AND m.user_id = e.user_id "
+        "WHERE e.guild_id=? AND e.event='join' AND COALESCE(m.is_bot,0)=0 "
+        "AND julianday(e.at) >= julianday(?) - %d" % JOIN_BURST_DAYS,
+        (guild_id, row["at"]),
+    ) or 1
+    arrival = ("Somebody joined at %s" % row["at"] if burst == 1
+               else "%d people joined, the most recent at %s" % (burst, row["at"]))
     prompt = "\n".join(
         [
             "# What happened",
             "",
-            "Somebody joined at %s, and nobody had joined in the %d days before that."
-            % (row["at"], JOIN_DROUGHT_DAYS),
+            "%s, after %d days in which nobody had."
+            % (arrival, JOIN_DROUGHT_DAYS),
             "  invite attributed: %s" % (row["invite_code"] or "unknown"),
             "",
             "# Your question",

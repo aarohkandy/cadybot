@@ -481,7 +481,12 @@ def _numeric_literals(snap: Dict[str, Any]) -> Set[str]:
 _CHANNEL_REF = re.compile(
     r"#([A-Za-z0-9_-]{2,})"
     r"|['\u2018\u2019\"\u201c\u201d]([A-Za-z0-9_ -]{2,32})['\u2018\u2019\"\u201c\u201d]\s+channel"
-    r"|\bthe\s+([A-Za-z0-9_-]{2,32})\s+channel\b"
+    # The bare "the X channel" alternative was dropped: it read "post in the
+    # right channel" and "pick the busiest channel" as references to channels
+    # called right and busiest. A false positive here silently suppresses a
+    # good unprompted message, which is the more expensive direction to be
+    # wrong in — the check exists to catch an invented #name, and #name and a
+    # quoted name still match.
 )
 
 
@@ -553,7 +558,10 @@ def _normalise(token: str) -> str:
 # advice — go participate in r/3Dprinting rather than over-read one message —
 # and suppressed it, because "3" appears in no snapshot. The single most likely
 # phrase this founder's advisor could ever use silenced it permanently.
-_CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z])")
+# The trailing guard rejects digits too, or the engine backtracks: in
+# "activity.messages_30d" it tries "30", fails on the "d", then happily matches
+# "3" because a "0" follows. Naming a metric emitted a phantom invented number.
+_CITED_NUMERAL = re.compile(r"(?<![A-Za-z0-9])-?\d+(?:\.\d+)?(?![A-Za-z0-9])")
 
 # Dates are not statistics. `_numeric_literals` already refuses to mine a
 # timestamp on the snapshot side, for the stated reason that six arbitrary
@@ -705,9 +713,15 @@ def brief(
         rec.horizon_days = max(rec.horizon_days, scorecard.window_days(rec.metric))
     # no_action_reason is checked too: it is required to cite a number, and a
     # required number is exactly the kind that gets invented to satisfy a rule.
-    cited = [rec.evidence for rec in result.recommendations]
-    if result.no_action_reason:
-        cited.append(result.no_action_reason)
+    # Everything render_brief actually shows him. It checked `evidence` and
+    # `no_action_reason` while printing headline, action, play_fails_when and
+    # dont unchecked — and verify_evidence's own docstring names "engagement is
+    # down about 30%" as the motivating failure, which is a headline.
+    cited = []
+    for rec in result.recommendations:
+        cited += [rec.evidence, rec.headline, rec.action, rec.play_fails_when]
+    cited += [result.headline, result.dont, result.no_action_reason]
+    cited = [c for c in cited if c]
     result._unverified = sorted(
         set(token for text in cited for token in verify_evidence(snap, text))
     )

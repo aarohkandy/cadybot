@@ -1078,6 +1078,41 @@ check("65 the verdict reaches the founder in scorecard's own words",
 check("65b and never as a word the code did not choose",
       p65 is not None and "failed" not in (p65.finding or ""), p65.finding if p65 else None)
 
+# 66: a bot joining is an integration being added, not somebody arriving.
+gid = fresh(900940)
+member(gid, 9, is_bot=1, name="some-webhook")
+db.connect().execute(
+    "INSERT INTO member_events (guild_id, user_id, event, at) VALUES (?, 9, 'join', ?)",
+    (gid, ago(hours=2)))
+check("66 adding an integration is not somebody arriving",
+      (agenda.next_provocation(gid, empty_snap()) or type("x", (), {"kind": None})).kind != "joined")
+
+# 67: the sentence must not assert a drought the burst window was ignoring.
+gid = fresh(900941)
+for uid, h in ((1, 5), (2, 4), (3, 3)):
+    member(gid, uid, name="p%d" % uid)
+    db.connect().execute(
+        "INSERT INTO member_events (guild_id, user_id, event, at) VALUES (?,?, 'join', ?)",
+        (gid, uid, ago(hours=h)))
+p67 = agenda.next_provocation(gid, empty_snap())
+check("67 a burst is described as a burst", p67 is not None and p67.kind == "joined")
+check("67b and it does not claim nobody joined",
+      p67 is not None and "3 people joined" in p67.self_prompt,
+      (p67.self_prompt[:160] if p67 else None))
+
+# 68: a forget-me request must not leave a copy of what somebody said.
+gid = fresh(900942)
+member(gid, 42, name="leaver")
+db.connect().execute(
+    "INSERT INTO journal (guild_id, kind, provoked_by, started_at, self_prompt, "
+    "outcome, finding, to_founder) VALUES (?, 'ignored', ?, ?, 'sp', 'thought', ?, ?)",
+    (gid, ago(hours=3), ago(hours=3), "**leaver** asked something.", "answer leaver"))
+db.purge_member(gid, 42)
+left = db.scalar(
+    "SELECT COUNT(*) FROM journal WHERE guild_id=? AND (finding IS NOT NULL "
+    "OR to_founder IS NOT NULL)", (gid,))
+check("68 purging a member clears what the desk quoted of them", left == 0, left)
+
 # ------------------------------------------------------------------- report
 
 print()

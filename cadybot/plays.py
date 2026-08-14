@@ -121,8 +121,13 @@ PLAYS: Tuple[Play, ...] = (
         stages=("seed", "sprout"),
         title="Post the work, not an announcement",
         when="the founder has gone quiet",
-        precondition=lambda s: (_m(s, "activity.days_since_owner_posted", 0) or 0) >= 7,
-        satisfied=lambda s: (_m(s, "activity.days_since_owner_posted", 999) or 999) < 3,
+        # None means he has never posted at all, which is the strongest possible
+        # case for this play. Defaulting it to 0 made it read as "posted today"
+        # and the play unreachable for exactly the founder who needs it most.
+        precondition=lambda s: (_m(s, "activity.days_since_owner_posted") is None
+                                or _m(s, "activity.days_since_owner_posted") >= 7),
+        satisfied=lambda s: (_m(s, "activity.days_since_owner_posted") is not None
+                             and _m(s, "activity.days_since_owner_posted") < 3),
     ),
     Play(
         id="show_a_failure",

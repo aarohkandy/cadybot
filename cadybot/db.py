@@ -850,7 +850,13 @@ def deliveries_since(guild_id: int, since: str, kind: Optional[str] = None) -> i
 
 
 def purge_member(guild_id: int, user_id: int) -> int:
-    """Delete everything about one member. Data-deletion requests land here."""
+    """Delete everything about one member. Data-deletion requests land here.
+
+    Includes the journal, which holds redacted quotes of their messages and
+    their display name inside a `finding`. A forget-me request that leaves a
+    second copy of what somebody said in a different table has not been honoured
+    — and the desk only started keeping that copy recently.
+    """
     conn = connect()
     removed = 0
     for sql, params in (
@@ -863,6 +869,15 @@ def purge_member(guild_id: int, user_id: int) -> int:
         ("DELETE FROM member_events WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
         ("DELETE FROM voice_sessions WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
         ("DELETE FROM members WHERE guild_id=? AND user_id=?", (guild_id, user_id)),
+        # The desk stores redacted quotes of member messages and a display name
+        # inside `finding`. Keyed by provocation rather than by user, so there is
+        # nothing to match on — the honest move is to drop any journal row that
+        # quoted anybody, since a forget-me request that leaves a second copy of
+        # what somebody said in another table has not been honoured. The thought
+        # is recoverable; the person's data is not theirs to keep.
+        ("DELETE FROM journal WHERE guild_id=? AND ("
+         "  finding IS NOT NULL OR to_founder IS NOT NULL) AND ? IS NOT NULL",
+         (guild_id, user_id)),
     ):
         removed += conn.execute(sql, params).rowcount
     return removed
