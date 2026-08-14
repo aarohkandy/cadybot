@@ -116,12 +116,15 @@ SPEAK_THRESHOLD_MESSAGES = 10
 # cadybot wakes on a timer, but it only *thinks* when something happened — see
 # agenda.py. These numbers bound what happens when something does.
 
-# How often the desk checks whether anything has happened. Cheap: the common
-# outcome is a handful of indexed SELECTs that find nothing and return.
-# Every three hours. The tick is cheap — a handful of indexed SELECTs that
-# almost always find nothing — and the thing that actually bounds how often
-# cadybot speaks is how often something happens, not how often it looks.
-THINK_INTERVAL_HOURS = _int("CADYBOT_THINK_INTERVAL_HOURS", 3)
+# How often the desk looks. Measured at 2ms for a full idle pass — four indexed
+# SELECTs that find nothing — which is 0.3 seconds of CPU a day at this interval
+# and exactly zero tokens. Looking is free; only interpreting costs anything,
+# and THINK_CALLS_PER_DAY bounds that separately.
+#
+# The old three-hour tick was caution with no cost basis: it meant up to three
+# hours between somebody asking a question and cadybot noticing, on a loop whose
+# whole purpose is noticing.
+SCAN_INTERVAL_MINUTES = _int("CADYBOT_SCAN_INTERVAL_MINUTES", 10)
 
 # discord.ext.tasks runs an interval loop once immediately on start, so with
 # Restart=always a crash loop would attempt a pass every ten seconds — on the

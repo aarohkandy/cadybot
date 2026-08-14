@@ -120,22 +120,22 @@ def run(gid, days, world, label):
     stub = Stub()
     advisor.llm.generate = stub
     said, thoughts, kinds = [], 0, {}
-    tick_every = config.THINK_INTERVAL_HOURS
+    per_hour = max(1, 60 // config.SCAN_INTERVAL_MINUTES)
     start = CLOCK["t"]
 
     for day in range(days):
-        for hour in range(24):
-            CLOCK["t"] = start + dt.timedelta(days=day, hours=hour)
-            if hour == 9:
+        for slot in range(24 * per_hour):
+            hour = slot // per_hour
+            CLOCK["t"] = (start + dt.timedelta(days=day, hours=hour)
+                          + dt.timedelta(minutes=(slot % per_hour) * config.SCAN_INTERVAL_MINUTES))
+            if hour == 9 and slot % per_hour == 0:
                 world(gid, day)
             # the hourly ledger close, as listener.hourly_facts does it
-            try:
-                ledger.record_day(gid, snapshot.build(gid))
-            except Exception:
-                pass
-            if hour % tick_every:
-                continue
-
+            if slot % per_hour == 0:
+                try:
+                    ledger.record_day(gid, snapshot.build(gid))
+                except Exception:
+                    pass
             # one desk pass, inlined from thinking.think so the simulation does
             # not need an event loop or a Discord client
             agenda.reap_stale(gid)
@@ -168,6 +168,7 @@ def run(gid, days, world, label):
                 said.append((CLOCK["t"], prov.kind))
 
     weeks = max(days / 7.0, 1e-9)
+    looks = agenda.scans_today(gid).get("scans", 0)
     print("  %-22s %2d thoughts, %2d messages  (%.1f msgs/week)  %s"
           % (label, thoughts, len(said), len(said) / weeks,
              ", ".join("%s×%d" % (k, v) for k, v in sorted(kinds.items())) or "-"))
@@ -212,8 +213,8 @@ def main():
     db.connect()
     scorecard.ensure_schema()
     want = sys.argv[1:] or list(SCENARIOS)
-    print("cadence: tick %dh | %d thoughts/day | %d msgs/week | %dh gap | %s-%s UTC"
-          % (config.THINK_INTERVAL_HOURS, config.THINK_CALLS_PER_DAY,
+    print("cadence: look every %dm | %d thoughts/day | %d msgs/week | %dh gap | %s-%s UTC"
+          % (config.SCAN_INTERVAL_MINUTES, config.THINK_CALLS_PER_DAY,
              config.SURFACE_MAX_PER_WEEK, config.SURFACE_MIN_GAP_HOURS,
              *config.SURFACE_WINDOW_UTC))
     print()

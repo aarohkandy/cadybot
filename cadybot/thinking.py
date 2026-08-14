@@ -72,6 +72,7 @@ async def think(client, guild_id: int) -> Optional[str]:
             return text
 
     if not agenda.affordable(guild_id):
+        agenda.record_scan(guild_id, "budget")
         return None
 
     # No generator reads the snapshot — they all query stored rows — so building
@@ -79,6 +80,7 @@ async def think(client, guild_id: int) -> Optional[str]:
     # milliseconds of SQL on the event loop, four times a day, to answer a
     # question that is almost always "nothing".
     prov = agenda.next_provocation(guild_id, None)
+    agenda.record_scan(guild_id, prov.kind if prov else None)
     if prov is None:
         return None                       # the common case, by design
 
@@ -138,7 +140,11 @@ def preview(guild_id: int) -> Dict[str, Any]:
         "SELECT COUNT(*) FROM journal WHERE guild_id=? AND started_at>=?",
         (guild_id, db.hours_ago(24)),
     )
+    seen = agenda.scans_today(guild_id)
     out = {
+        "scans_today": seen.get("scans", 0),
+        "found_today": seen.get("found", 0),
+        "last_look": seen.get("last_at"),
         "affordable": agenda.affordable(guild_id),
         "spent_today": spent,
         "budget": config.THINK_CALLS_PER_DAY,

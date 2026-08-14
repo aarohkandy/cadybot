@@ -1155,6 +1155,28 @@ check("69e but not again tomorrow with nothing new",
       (agenda.next_provocation(gid, empty_snap()) or type("x", (), {"kind": None})).kind
       != "digest")
 
+# 70: looking is free and must stay free. An idle pass is four indexed SELECTs;
+# the whole point of running it every ten minutes rather than every three hours
+# is that noticing costs nothing and only interpreting costs anything.
+gid = fresh(900960)
+import time as _time
+agenda.next_provocation(gid, empty_snap())          # warm
+_t0 = _time.perf_counter()
+for _ in range(50):
+    agenda.next_provocation(gid, empty_snap())
+_ms = (_time.perf_counter() - _t0) / 50 * 1000
+check("70 an idle look stays cheap", _ms < 50, "%.1fms per pass" % _ms)
+
+# and it is counted, so "constantly thinking" is a number he can read rather
+# than a claim — an idle pass writes no journal row by design.
+agenda.record_scan(gid, None)
+agenda.record_scan(gid, None)
+agenda.record_scan(gid, "ignored")
+seen = agenda.scans_today(gid)
+check("70b every look is tallied", seen.get("scans") == 3, seen)
+check("70c and the ones that found something", seen.get("found") == 1, seen)
+check("70d the tally is today's, not all time", seen.get("day") == ledger.today())
+
 # ------------------------------------------------------------------- report
 
 print()

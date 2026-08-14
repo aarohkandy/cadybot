@@ -55,6 +55,12 @@ INSTALLED_KEY = "agenda_installed_at"
 # accumulating and `/notes` keeps showing it.
 QUIET_KEY = "agenda_quiet_until"
 
+# A tally of how often the desk has looked. Kept so "it is constantly thinking"
+# is a number the founder can read rather than a claim — an idle pass leaves no
+# journal row by design, so without this the work is invisible and indeed
+# indistinguishable from a dead loop.
+SCANS_KEY = "agenda_scans"
+
 # Precedence. First match wins, and there is no scoring: a ranking formula over
 # hand-tuned weights was tried in design and froze solid after one cycle, which
 # is what ranking formulas over hand-tuned weights do.
@@ -124,6 +130,35 @@ class Provocation:
 
 
 # --- installation ----------------------------------------------------------
+
+
+def record_scan(guild_id: int, found: Optional[str]) -> Dict[str, Any]:
+    """Note that the desk looked, and what it saw. One tiny write, no model.
+
+    Resets daily so the count means "today" rather than "since install".
+    """
+    today = ledger.today()
+    try:
+        state = json.loads(db.get_setting(guild_id, SCANS_KEY) or "{}")
+    except ValueError:
+        state = {}
+    if state.get("day") != today:
+        state = {"day": today, "scans": 0, "found": 0}
+    state["scans"] = int(state.get("scans", 0)) + 1
+    if found:
+        state["found"] = int(state.get("found", 0)) + 1
+        state["last_found"] = found
+    state["last_at"] = db.now()
+    db.set_setting(guild_id, SCANS_KEY, json.dumps(state))
+    return state
+
+
+def scans_today(guild_id: int) -> Dict[str, Any]:
+    try:
+        state = json.loads(db.get_setting(guild_id, SCANS_KEY) or "{}")
+    except ValueError:
+        return {}
+    return state if state.get("day") == ledger.today() else {}
 
 
 def installed_at(guild_id: int, create: bool = True) -> Optional[str]:

@@ -103,14 +103,20 @@ class Cadybot(discord.Client):
         # heartbeat the health check reads. Only the two reporting passes are
         # handed to cron.
         if config.SCHEDULER == "cron":
-            print("scheduler: cron (weekly/nightly/think run via `cadybot post`/`think`)")
+            print("scheduler: cron (weekly/nightly via `cadybot post`); "
+                  "desk runs in-process every %dm" % config.SCAN_INTERVAL_MINUTES)
         else:
             if not self.weekly_brief.is_running():
                 self.weekly_brief.start()
             if not self.daily_alerts.is_running():
                 self.daily_alerts.start()
-            if not self.think_pass.is_running():
-                self.think_pass.start()
+        # The desk starts under BOTH scheduler modes, unlike the two reporting
+        # passes. An idle look is 2ms of indexed SELECTs and no tokens, and it
+        # is the part that has to be responsive — handing it to a timer meant
+        # hours between somebody asking a question and cadybot noticing. What
+        # cron still owns is the nightly and weekly reports.
+        if not self.think_pass.is_running():
+            self.think_pass.start()
         if not self.hourly_facts.is_running():
             self.hourly_facts.start()
 
@@ -574,7 +580,7 @@ class Cadybot(discord.Client):
             except Exception:
                 traceback.print_exc()
 
-    @tasks.loop(hours=config.THINK_INTERVAL_HOURS)
+    @tasks.loop(minutes=config.SCAN_INTERVAL_MINUTES)
     async def think_pass(self) -> None:
         """The desk. Wakes on a timer, thinks only when something happened.
 
@@ -867,16 +873,20 @@ def register_commands(bot: Cadybot) -> None:
             await _reply(interaction, NO_ROOM, True)
             return
         rows = agenda.recent(interaction.guild_id, limit=8)
+        seen = agenda.scans_today(interaction.guild_id)
+        looked = ("I have checked **%d times today** and found nothing new. "
+                  % seen["scans"] if seen.get("scans") else "")
         if not rows:
             state = thinking.preview(interaction.guild_id)
             await _reply(
                 interaction,
-                "Nothing yet. cadybot only thinks when something happens in the "
-                "server — right now: _%s_." % state["why"],
+                "%sI only spend a model call when something has actually "
+                "happened — right now: _%s_." % (looked, state["why"]),
                 True,
             )
             return
-        lines = ["**What I have been thinking about**", ""]
+        lines = ["**What I have been thinking about**", "",
+                 looked.strip() or "", ""]
         for row in rows:
             when = row["started_at"][:10]
             lines.append("`%s` **%s**%s — %s" % (

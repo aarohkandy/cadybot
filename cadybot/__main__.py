@@ -255,6 +255,8 @@ def main(argv=None) -> int:
 
     if args.command == "reflect":
         state = thinking.preview(guild_id)
+        print("looked      : %d times today, last at %s"
+              % (state.get("scans_today", 0), (state.get("last_look") or "-")[11:19]))
         print("budget      : %d of %d used in the last 24h%s"
               % (state["spent_today"], state["budget"],
                  "" if state["affordable"] else "  (spent)"))
