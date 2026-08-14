@@ -1105,6 +1105,7 @@ def render_reflection(r: Reflection, prov: Any) -> str:
         "drift": "a count moved over the last two weeks",
         "backlog": "I read your history for the first time",
         "ignored": "somebody's message has gone unanswered",
+        "digest": "the daily check-in",
     }.get(prov.kind, prov.kind)
     trail = "_%s" % because
     if prov.about_ref:
